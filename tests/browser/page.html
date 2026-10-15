@@ -1,0 +1,13 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;background:#222">
+<script>
+  // Stand-in for Home Assistant's hass object: callApi goes to the fake integration.
+  window.hassStub = {
+    callApi: async (method, path, body) => {
+      const r = await fetch("/api/" + path, { method, headers: body ? { "Content-Type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined });
+      if (!r.ok) throw { status: r.status, body: await r.json().catch(() => ({})) };
+      return r.json();
+    },
+  };
+</script>
+<script src="/stalker-card.js" charset="utf-8"></script>
+</body></html>

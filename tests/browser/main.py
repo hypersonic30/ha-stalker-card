@@ -1,0 +1,90 @@
+from _server import *
+
+serve()
+with sync_playwright() as p:
+    b, pg, errors = browser_page(p)
+    open_card(pg)
+    tabs = pg.locator("stalker-card >> .tab").all_inner_texts()
+    check("tabs Live/Filme/Serien", tabs == ["Live-TV", "Filme", "Serien"], tabs)
+    pg.wait_for_selector("stalker-card >> .row")
+    rows = pg.locator("stalker-card >> #body .row").count()
+    check("live list limited to 80 + Mehr", rows == 80 and pg.locator("stalker-card >> .more").count() == 1, rows)
+    pg.locator("stalker-card >> .more").click()
+    check("Mehr shows next 80", pg.locator("stalker-card >> #body .row").count() == 160)
+    check("channel name is escaped", pg.locator("stalker-card >> #body .row b").count() == 0)
+    pg.fill("stalker-card >> input[data-q=live]", "kanal 07")
+    check("search filters (Kanal 070-079)", pg.locator("stalker-card >> #body .row").count() == 10, pg.locator("stalker-card >> #body .row").count())
+    pg.fill("stalker-card >> input[data-q=live]", "")
+    pg.select_option("stalker-card >> select[data-genre]", "2")
+    check("genre filter halves the list", pg.locator("stalker-card >> #body .row").count() == 80 and pg.locator("stalker-card >> .more").count() == 1)
+
+    # play live
+    pg.select_option("stalker-card >> select[data-genre]", "")
+    pg.locator("stalker-card >> .row", has_text="Kanal 003").click()
+    pg.wait_for_function("() => { const v = card.shadowRoot.querySelector('video'); return v && v.currentTime > 1.5 }", timeout=30000)
+    check("video really plays (hls.js, real Chrome)", True)
+    check("play request is by id only", ("POST", "play", {"kind": "live", "id": "3", "start": 0}) in calls(), calls()[-3:])
+    pg.wait_for_function("() => card.shadowRoot.getElementById('epg')?.textContent.includes('Tagesschau')", timeout=5000)
+    check("EPG now/next shown", "danach" in pg.inner_text("stalker-card >> #epg"))
+    check("live has native controls, no seek bar", pg.locator("stalker-card >> input[data-seek]").count() == 0)
+    pg.locator("stalker-card >> [data-action=close]").click()
+    check("close hides player and sends stop", pg.locator("stalker-card >> #player").is_hidden() and ("POST", "stop", {"session": "sess1"}) in calls(), calls()[-2:])
+
+    # VOD
+    pg.locator("stalker-card >> .tab", has_text="Filme").click()
+    pg.wait_for_selector("stalker-card >> .poster")
+    check("vod first page 60 + Mehr", pg.locator("stalker-card >> .poster").count() == 60)
+    check("vod title escaped (no XSS)", pg.evaluate("() => window.__xss") is None and pg.locator("stalker-card >> .poster img[src='x']").count() == 0)
+    pg.locator("stalker-card >> [data-action=morevod]").click()
+    pg.wait_for_function("() => card.shadowRoot.querySelectorAll('.poster').length === 120")
+    pg.fill("stalker-card >> input[data-q=vod]", "film 130")
+    pg.wait_for_function("() => card.shadowRoot.querySelectorAll('.poster').length === 1")
+    check("vod search goes to the server", any(c[1].startswith("vod?") and "q=film+130" in c[1] for c in calls()), calls()[-3:])
+    pg.fill("stalker-card >> input[data-q=vod]", "")
+    pg.select_option("stalker-card >> select[data-group]", "Drama")
+    pg.wait_for_function("() => card.shadowRoot.querySelector('[data-action=morevod]')?.textContent.includes('(5)')")
+    check("vod group filter goes to the server", any("group=Drama" in c[1] for c in calls() if c[1].startswith("vod?")))
+    pg.select_option("stalker-card >> select[data-group]", "")
+    pg.fill("stalker-card >> input[data-q=vod]", "film 130")
+    pg.wait_for_function("() => card.shadowRoot.querySelectorAll('.poster').length === 1")
+    pg.locator("stalker-card >> .poster").click()
+    pg.wait_for_selector("stalker-card >> input[data-seek]")
+    check("vod shows seek bar with duration", "5:00" in pg.inner_text("stalker-card >> .seek"))
+    pg.wait_for_function("() => { const v = card.shadowRoot.querySelector('video'); return v && v.currentTime > 1 }", timeout=30000)
+    pg.evaluate("() => { const s = card.shadowRoot.querySelector('input[data-seek]'); s.value = 120; s.dispatchEvent(new Event('input', {bubbles:true})); s.dispatchEvent(new Event('change', {bubbles:true})); }")
+    pg.wait_for_function("() => true")
+    pg.wait_for_timeout(900)
+    check("seek restarts the stream at that second", ("POST", "play", {"kind": "vod", "id": "m130", "start": 120}) in calls(), [c for c in calls() if c[1] == "play"])
+
+    # server dropped the stream (e.g. long pause) -> card restarts where the player was
+    pg.wait_for_function("() => { const v = card.shadowRoot.querySelector('video'); return v && v.currentTime > 2 }", timeout=30000)
+    n = len([c for c in calls() if c[1] == "play"])
+    FATAL = "() => { if (card._hls) card._hls.trigger(window.Hls.Events.ERROR, {type: 'networkError', details: 'x', fatal: true}); else card.shadowRoot.querySelector('video')?.dispatchEvent(new Event('error')); }"
+    print("engine:", pg.evaluate("() => card._hls ? 'hls.js' : 'native HLS'"))
+    pg.evaluate(FATAL)
+    pg.wait_for_function(f"() => true")
+    pg.wait_for_timeout(800)
+    plays = [c for c in calls() if c[1] == "play"]
+    check("fatal stream error restarts at the current position", len(plays) == n + 1 and plays[-1][2]["start"] >= 120 + 2, plays[-2:])
+    for _ in range(3):
+        pg.evaluate(FATAL)
+        pg.wait_for_timeout(300)
+    pg.wait_for_timeout(1200)
+    check("repeated failures give up instead of looping", "unterbrochen" in pg.inner_text("stalker-card >> .err") and pg.locator("stalker-card >> #player").is_hidden(), len([c for c in calls() if c[1] == "play"]))
+
+    # series
+    pg.locator("stalker-card >> .tab", has_text="Serien").click()
+    pg.locator("stalker-card >> .poster", has_text="Bleach").click()
+    pg.wait_for_selector("stalker-card >> .season")
+    pg.locator("stalker-card >> .row", has_text="S01E02").click()
+    pg.wait_for_function("() => { const v = card.shadowRoot.querySelector('video'); return v && v.currentTime > 1 }", timeout=30000)
+    check("episode plays by episode id", ("POST", "play", {"kind": "episode", "id": "e2", "start": 0}) in calls() or any(c[2] and c[2].get("id") == "e2" for c in calls() if c[1] == "play"))
+
+    # errors
+    STATE["play_error"] = "video_codec_unsupported"
+    pg.locator("stalker-card >> .row", has_text="S01E03").click()
+    pg.wait_for_selector("stalker-card >> .err")
+    check("German error text, player closed", "Codec" in pg.inner_text("stalker-card >> .err") and pg.locator("stalker-card >> #player").is_hidden())
+    check("no page errors", not errors, errors)
+    b.close()
+finish()
