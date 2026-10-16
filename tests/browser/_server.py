@@ -21,7 +21,9 @@ STATE = {}
 def reset():
     STATE.clear()
     STATE.update(calls=[], info={"vod": True, "series": True, "max_streams": 1}, play_error=None, session=0,
-                 transcoding=False, progress={}, resume=[], long_season=False)
+                 transcoding=False, progress={}, resume=[], long_season=False,
+                 portals=[{"id": "p1", "title": "Zuhause", "source": "stalker"}], channels_by={}, info_by={}, favs={},
+                 seen=[], delay={}, fav_error=None, progress_by={})
 
 
 def calls():
@@ -69,12 +71,21 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._send(200, open(f, "rb").read(), ct) if os.path.isfile(f) else self._send(404, {})
         if not p.startswith("/api/stalker/"):
             return self._send(404, {})
-        STATE["calls"].append(("GET", p[len("/api/stalker/"):] + (("?" + u.query) if u.query else ""), None))
         r = p[len("/api/stalker/"):]
+        raw = q.pop("portal", [""])[0]
+        portal = raw or (STATE["portals"][0]["id"] if STATE["portals"] else "")
+        rest = urllib.parse.urlencode({k: v[0] for k, v in q.items()})
+        STATE["calls"].append(("GET", r + (("?" + rest) if rest else ""), None))
+        STATE["seen"].append((r, raw))
+        if r == "portals":
+            return self._send(200, {"items": STATE["portals"]})
         if r == "info":
-            return self._send(200, STATE["info"])
+            return self._send(200, STATE["info_by"].get(portal, STATE["info"]))
+        if r == "favorites":
+            return self._send(200, {"ids": STATE["favs"].get(portal, [])})
         if r == "live":
-            return self._send(200, {"genres": [{"id": "*", "title": "Alle"}, {"id": "1", "title": "News"}, {"id": "2", "title": "Sport"}], "channels": CHANNELS})
+            time.sleep(STATE["delay"].get(portal, 0))
+            return self._send(200, {"genres": [{"id": "*", "title": "Alle"}, {"id": "1", "title": "News"}, {"id": "2", "title": "Sport"}], "channels": STATE["channels_by"].get(portal, CHANNELS)})
         if r == "nowplaying":
             now = int(time.time())
             return self._send(200, {"items": {c["id"]: {"t": "Tagesschau", "s": now - 600, "e": now + 600, "n": "Wetter", "ns": now + 600}
@@ -88,7 +99,7 @@ class H(http.server.BaseHTTPRequestHandler):
                               for k in range(0, (t1 - base) // 3600 + 1) if base + (k + 1) * 3600 > t0]
             return self._send(200, {"items": items})
         if r == "progress":
-            return self._send(200, {"items": STATE["progress"], "resume": STATE["resume"]})
+            return self._send(200, {"items": STATE["progress_by"].get(portal, STATE["progress"]), "resume": STATE["resume"] if portal in ("", "p1") else []})
         if r.startswith("epg/"):
             return self._send(200, {"items": [{"title": "Tagesschau", "descr": "", "start": 0, "stop": 9999999999},
                                               {"title": "Wetter", "descr": "", "start": 9999999999, "stop": 9999999999 + 600}]})
@@ -107,7 +118,18 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
         r = urllib.parse.urlparse(self.path).path[len("/api/stalker/"):]
+        portal = body.pop("portal", None)
         STATE["calls"].append(("POST", r, body))
+        STATE["seen"].append((r, portal))
+        if r == "favorites":
+            if STATE["fav_error"]:
+                return self._send(409, {"code": STATE["fav_error"]})
+            ids = STATE["favs"].setdefault(portal or STATE["portals"][0]["id"], [])
+            if body["fav"] and body["id"] not in ids:
+                ids.append(body["id"])
+            elif not body["fav"] and body["id"] in ids:
+                ids.remove(body["id"])
+            return self._send(200, {"ids": list(ids)})
         if r == "play":
             if STATE["play_error"]:
                 return self._send(502, {"code": STATE["play_error"]})

@@ -1,5 +1,5 @@
-/* Stalker Card – Live-TV, Programm, Filme und Serien aus einem Stalker-Portal (Integration "stalker"). */
-const CARD_VERSION = "0.3.0";
+/* Stalker Card – Live-TV, Programm, Filme und Serien aus einem oder mehreren Portalen (Integration "stalker"). */
+const CARD_VERSION = "0.4.0";
 const CARD_TAG = "stalker-card";
 const HLS_URL = "https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.17/hls.min.js";
 const PAGE = 60; // Filme je Seite (Server)
@@ -12,6 +12,8 @@ const EPG_REFRESH_MS = 60000;
 const REPORT_EVERY_MS = 15000;
 const RESUME_MIN_S = 30; // darunter: nur kurz angetippt
 const RESUME_BACK_S = 5;
+const FAV = "__fav__"; // Pseudo-Genre "Favoriten"
+const LS_PORTAL = "sc-portal"; // zuletzt gewähltes Portal
 
 const ERRORS = {
   video_codec_unsupported: "Dieses Video enthält keinen abspielbaren Videostream.",
@@ -26,8 +28,11 @@ const ERRORS = {
   portal_unreachable: "Das Portal ist nicht erreichbar.",
   not_found: "Eintrag nicht gefunden.",
   not_loaded: "Die Integration ist nicht geladen.",
+  portal_not_found: "Dieses Portal gibt es nicht mehr.",
+  too_many_favorites: "Es sind zu viele Favoriten gespeichert.",
+  no_portal: "Es ist noch kein Portal eingerichtet. Füge in den Integrationseinstellungen ein Portal hinzu.",
 };
-const errMessage = (e) => ERRORS[e?.body?.code] || (e?.status === 401 ? "Bitte neu anmelden." : "Es ist ein Fehler aufgetreten.");
+const errMessage = (e) => e?.stale ? "" : ERRORS[e?.body?.code] || (e?.status === 401 ? "Bitte neu anmelden." : "Es ist ein Fehler aufgetreten.");
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmtTime = (s) => {
@@ -73,7 +78,11 @@ const STYLE = `
   ha-card::before { content: ""; position: absolute; inset: 0; pointer-events: none; opacity: 0.6;
     background: linear-gradient(120deg, rgba(255,255,255,0.30), rgba(255,255,255,0.05) 35%, transparent 60%); }
   .sc-root { position: relative; z-index: 1; display: flex; flex-direction: column; color: var(--primary-text-color); }
-  .sc-header { padding: 18px 18px 6px; font-size: 1.35em; font-weight: 700; letter-spacing: -0.01em; }
+  .sc-header { padding: 18px 18px 6px; font-size: 1.35em; font-weight: 700; letter-spacing: -0.01em; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .sc-header span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sc-select { max-width: 55%; min-height: 36px; padding: 4px 12px; border-radius: 999px; font: inherit; font-size: 0.6em; font-weight: 600; color: inherit; cursor: pointer;
+    background: color-mix(in srgb, var(--primary-text-color) 8%, transparent); border: 1px solid var(--sc-line); }
+  .sc-select[hidden] { display: none; }
   .sc-error { display: flex; align-items: center; gap: 8px; margin: 10px 16px 0; padding: 10px 14px; border-radius: var(--sc-radius-sm);
     color: white; font-size: 0.9em; background: color-mix(in srgb, var(--error-color, #db4437) 85%, transparent); }
   .sc-tabs { display: flex; gap: 4px; margin: 8px 16px 0; padding: 4px; border-radius: 999px;
@@ -123,6 +132,12 @@ const STYLE = `
   .sc-channels { display: flex; flex-direction: column; gap: 8px; }
   .sc-ch { display: flex; gap: 12px; align-items: center; padding: 10px; border-radius: var(--sc-radius-md); cursor: pointer; width: 100%; text-align: left;
     background: var(--sc-soft); border: 1px solid var(--sc-line); color: inherit; font: inherit; }
+  .sc-chrow { display: flex; gap: 6px; align-items: stretch; }
+  .sc-chrow .sc-ch { flex: 1; min-width: 0; }
+  .sc-fav { flex: none; width: 46px; border-radius: var(--sc-radius-md); cursor: pointer; color: var(--secondary-text-color);
+    background: var(--sc-soft); border: 1px solid var(--sc-line); display: inline-flex; align-items: center; justify-content: center; }
+  .sc-fav.on { color: #ffcc00; }
+  .sc-chip ha-icon { --mdc-icon-size: 16px; margin-right: 4px; vertical-align: -3px; }
   .sc-ch.on { background: color-mix(in srgb, var(--sc-accent) 14%, var(--sc-soft)); }
   .sc-logo { width: 46px; height: 46px; flex: none; border-radius: 10px; background: color-mix(in srgb, var(--primary-text-color) 8%, transparent);
     display: flex; align-items: center; justify-content: center; overflow: hidden; font-size: 0.7em; color: var(--secondary-text-color); }
@@ -219,6 +234,9 @@ class StalkerCard extends HTMLElement {
     super();
     this.attachShadow({ mode: "open" });
     this._tab = "live";
+    this._portals = null;
+    this._portal = "";
+    this._favs = [];
     this._info = null;
     this._live = null;
     this._now = {};
@@ -267,14 +285,79 @@ class StalkerCard extends HTMLElement {
   }
 
   // ── API ─────────────────────────────────────────────────────────────
-  _api(method, path, body) { return this._hass.callApi(method, "stalker/" + path, body); }
+  // Everything except the portal list and "stop" belongs to the chosen portal. An answer that arrives after the
+  // user has switched portals is dropped (a stale error has no message, so nothing is shown).
+  async _api(method, path, body) {
+    const pid = this._portal;
+    if (pid && path !== "portals" && path !== "stop") {
+      if (method === "GET") path += (path.includes("?") ? "&" : "?") + "portal=" + encodeURIComponent(pid);
+      else body = { ...body, portal: pid };
+    }
+    const r = await this._hass.callApi(method, "stalker/" + path, body);
+    if (pid !== this._portal) throw { stale: true };
+    return r;
+  }
+
+  _chooseInitialPortal() {
+    const list = this._portals;
+    let saved = "";
+    try { saved = localStorage.getItem(LS_PORTAL) || ""; } catch (_) { /* storage can be blocked */ }
+    const want = this._config?.portal;
+    const found = list.find((p) => p.id === saved)
+      || (want && list.find((p) => p.id === want || p.title.toLowerCase() === String(want).toLowerCase()))
+      || list[0];
+    return found.id;
+  }
 
   async _init() {
     try {
+      if (!this._portals) {
+        this._portals = (await this._api("GET", "portals")).items || [];
+        if (!this._portals.length) throw { body: { code: "no_portal" } };
+        this._portal = this._chooseInitialPortal();
+      }
       this._info = await this._api("GET", "info");
+      if (!this._tabs().some(([k]) => k === this._tab)) this._tab = "live"; // this portal has no such section
       this._loadProgress();
       await this._loadTab();
     } catch (e) { this._error = errMessage(e); }
+    this._render();
+  }
+
+  async _selectPortal(id) {
+    if (!id || id === this._portal || !this._portals?.some((p) => p.id === id)) return;
+    this._closePlayer();
+    this._detailDialog?.open && this._detailDialog.close();
+    this._portal = id;
+    try { localStorage.setItem(LS_PORTAL, id); } catch (_) { /* optional */ }
+    Object.assign(this, {
+      _info: null, _live: null, _now: {}, _favs: [], _series: null, _prog: { items: {}, resume: [] }, _genre: "", _error: "",
+      _vod: { items: [], total: 0, page: 0, groups: [], group: "" }, _guide: { t0: 0, progs: {}, loading: false },
+      _q: { live: "", guide: "", vod: "", series: "" }, _show: SHOW_STEP, _gshow: GUIDE_ROWS,
+    });
+    this._render();
+    await this._init();
+  }
+
+  async _loadFavs() {
+    try { this._favs = (await this._api("GET", "favorites")).ids || []; } catch (_) { /* favourites are optional */ }
+  }
+
+  async _a_fav(el) {
+    const id = el.dataset.id;
+    const on = !this._favs.includes(id);
+    const before = this._favs;
+    this._favs = on ? [...before, id] : before.filter((x) => x !== id);
+    if (this._player?.id === id) this._renderPlayerFav();
+    this._render();
+    try {
+      this._favs = (await this._api("POST", "favorites", { id, fav: on })).ids || this._favs;
+    } catch (e) {
+      if (e?.stale) return;
+      this._favs = before;
+      this._error = errMessage(e);
+    }
+    if (this._player?.id === id) this._renderPlayerFav();
     this._render();
   }
 
@@ -294,7 +377,7 @@ class StalkerCard extends HTMLElement {
     this._error = "";
     try {
       if ((this._tab === "live" || this._tab === "guide") && !this._live) this._live = await this._api("GET", "live");
-      if (this._tab === "live" || this._tab === "guide") await this._loadNow();
+      if (this._tab === "live" || this._tab === "guide") await Promise.all([this._loadNow(), this._loadFavs()]);
       if (this._tab === "guide") {
         if (this._guide.t0 && Date.now() / 1000 - this._guide.t0 > 7200) this._guide = { t0: 0, progs: {}, loading: false };
         await this._loadGuide();
@@ -340,13 +423,14 @@ class StalkerCard extends HTMLElement {
     if (this._skeletonReady) return;
     this._skeletonReady = true;
     this.shadowRoot.innerHTML = `${STYLE}<ha-card><div class="sc-root">
-      <div class="sc-header" id="sc-title"></div>
+      <div class="sc-header"><span id="sc-title"></span><select class="sc-select" id="sc-portal" data-portal aria-label="Portal" hidden></select></div>
       <div id="sc-error"></div>
       <div class="sc-tabs" id="sc-tabs" role="tablist"></div>
       <div id="sc-search"></div>
       <div class="sc-body" id="sc-body"></div>
     </div></ha-card>`;
     this._titleEl = this.shadowRoot.getElementById("sc-title");
+    this._portalEl = this.shadowRoot.getElementById("sc-portal");
     this._titleEl.textContent = this._config?.title || "Stalker TV";
 
     // Dialogs live in an overlay attached to <body>: HA's dashboard layouts detach and re-insert cards,
@@ -388,6 +472,14 @@ class StalkerCard extends HTMLElement {
     root.getElementById("sc-tabs").innerHTML = this._info
       ? this._tabs().map(([k, l, i]) => `<button class="sc-tab ${k === this._tab ? "active" : ""}" role="tab" aria-selected="${k === this._tab}" data-action="tab" data-tab="${k}"><ha-icon icon="${i}"></ha-icon><span>${l}</span></button>`).join("")
       : "";
+    const sel = this._portalEl;
+    const multi = (this._portals?.length || 0) > 1;
+    sel.hidden = !multi;
+    if (multi) {
+      const html = this._portals.map((p) => `<option value="${esc(p.id)}">${esc(p.title)}</option>`).join("");
+      if (sel.innerHTML !== html) sel.innerHTML = html;
+      sel.value = this._portal;
+    }
     const holder = root.getElementById("sc-search");
     const ph = { live: "Kanal suchen", guide: "Kanal suchen", vod: "Film suchen", series: "Serie suchen" }[this._tab];
     let input = holder.querySelector("input");
@@ -430,13 +522,18 @@ class StalkerCard extends HTMLElement {
     const genres = this._live.genres.filter((g) => g.id !== "*");
     return `<div class="sc-chips">
       <button class="sc-chip ${this._genre ? "" : "active"}" data-action="genre" data-id="">Alle</button>
+      <button class="sc-chip ${this._genre === FAV ? "active" : ""}" data-action="genre" data-id="${FAV}"><ha-icon icon="mdi:star"></ha-icon>Favoriten</button>
       ${genres.map((g) => `<button class="sc-chip ${g.id === this._genre ? "active" : ""}" data-action="genre" data-id="${esc(g.id)}">${esc(g.title)}</button>`).join("")}</div>`;
   }
 
   _filteredChannels(onlyGuide = false) {
     const q = this._q[onlyGuide ? "guide" : "live"].toLowerCase();
-    return (this._live?.channels || []).filter((c) =>
-      (!this._genre || c.genre_id === this._genre) && (!q || c.name.toLowerCase().includes(q)) && (!onlyGuide || this._now[c.id]));
+    const favs = new Set(this._favs);
+    const list = (this._live?.channels || []).filter((c) =>
+      (!this._genre || (this._genre === FAV ? favs.has(c.id) : c.genre_id === this._genre))
+      && (!q || c.name.toLowerCase().includes(q)) && (!onlyGuide || this._now[c.id]));
+    // In the guide the favourites come first (like a favourites group in a TV app).
+    return onlyGuide && !this._genre && favs.size ? [...list.filter((c) => favs.has(c.id)), ...list.filter((c) => !favs.has(c.id))] : list;
   }
 
   _liveHtml() {
@@ -446,11 +543,13 @@ class StalkerCard extends HTMLElement {
     const rows = all.slice(0, this._show).map((c) => {
       const n = this._now[c.id];
       const cur = n && n.s <= now && now < n.e ? n : null;
-      return `<button class="sc-ch ${this._player?.id === c.id ? "on" : ""}" data-action="play_live" data-id="${esc(c.id)}">
+      const fav = this._favs.includes(c.id);
+      return `<div class="sc-chrow"><button class="sc-ch ${this._player?.id === c.id ? "on" : ""}" data-action="play_live" data-id="${esc(c.id)}">
         ${this._logo(c)}<div class="sc-ch-main"><div class="sc-ch-name"><span class="sc-ch-num">${esc(c.number ?? "")}</span>${esc(c.name)}</div>
-        ${cur ? `<div class="sc-ch-now">${hhmm(cur.s)} ${esc(cur.t)}</div><div class="sc-meter"><div style="width:${Math.min(100, Math.max(0, ((now - cur.s) / (cur.e - cur.s)) * 100)).toFixed(0)}%"></div></div>` : ""}</div></button>`;
+        ${cur ? `<div class="sc-ch-now">${hhmm(cur.s)} ${esc(cur.t)}</div><div class="sc-meter"><div style="width:${Math.min(100, Math.max(0, ((now - cur.s) / (cur.e - cur.s)) * 100)).toFixed(0)}%"></div></div>` : ""}</div></button>
+        <button class="sc-fav ${fav ? "on" : ""}" data-action="fav" data-id="${esc(c.id)}" aria-pressed="${fav}" aria-label="${fav ? "Aus Favoriten entfernen" : "Zu Favoriten"}"><ha-icon icon="${fav ? "mdi:star" : "mdi:star-outline"}"></ha-icon></button></div>`;
     }).join("");
-    return `${this._genreChips()}<div class="sc-channels">${rows || `<div class="sc-empty">Keine Kanäle gefunden.</div>`}</div>
+    return `${this._genreChips()}<div class="sc-channels">${rows || `<div class="sc-empty">${this._genre === FAV ? "Noch keine Favoriten – tippe den Stern bei einem Sender." : "Keine Kanäle gefunden."}</div>`}</div>
       ${all.length > this._show ? `<button class="sc-btn secondary sc-more" data-action="more">Mehr (${all.length - this._show})</button>` : ""}`;
   }
 
@@ -642,6 +741,7 @@ class StalkerCard extends HTMLElement {
   _onChange(e) {
     const t = e.target;
     if (t.dataset?.seek !== undefined) this._seekTo(Number(t.value));
+    if (t.dataset?.portal !== undefined) this._selectPortal(t.value);
   }
 
   _searchVod = debounce(async () => {
@@ -842,6 +942,7 @@ class StalkerCard extends HTMLElement {
         ${live && list.length > 1 ? `<button class="sc-pbtn" data-action="chan" data-dir="-1" aria-label="Voriger Sender"><ha-icon icon="mdi:skip-previous"></ha-icon></button>` : ""}
         <div class="sc-ptitle"><b>${esc(p.title)}</b><small id="sc-epg">${esc(p.sub || "")}${p.transcoding ? " · umkodiert (720p)" : ""}</small></div>
         ${live && list.length > 1 && idx >= 0 ? `<button class="sc-pbtn" data-action="chan" data-dir="1" aria-label="Nächster Sender"><ha-icon icon="mdi:skip-next"></ha-icon></button>` : ""}
+        ${live ? `<button class="sc-pbtn" id="sc-pfav" data-action="fav" data-id="${esc(p.id)}"></button>` : ""}
         <button class="sc-pbtn" data-action="close_player" aria-label="Schließen"><ha-icon icon="mdi:close"></ha-icon></button>
       </div>
       ${p.loading ? `<div class="sc-spin">Stream startet …${p.kind !== "live" ? `<small>Der erste Start kann bis zu einer halben Minute dauern.</small>` : ""}</div>` : ""}
@@ -856,6 +957,16 @@ class StalkerCard extends HTMLElement {
       video.addEventListener("pause", () => this._report(true));
       video.addEventListener("ended", () => this._report(true, true));
     }
+    this._renderPlayerFav();
+  }
+
+  _renderPlayerFav() {
+    const b = this._playerDialog?.querySelector("#sc-pfav");
+    if (!b) return;
+    const fav = this._favs.includes(b.dataset.id);
+    b.setAttribute("aria-pressed", String(fav));
+    b.setAttribute("aria-label", fav ? "Aus Favoriten entfernen" : "Zu Favoriten");
+    b.innerHTML = `<ha-icon icon="${fav ? "mdi:star" : "mdi:star-outline"}"></ha-icon>`;
   }
 
   _a_chan(el) {
@@ -960,7 +1071,7 @@ window.customCards = window.customCards || [];
 window.customCards.push({
   type: CARD_TAG,
   name: "Stalker Card",
-  description: "Live-TV, Programm, Filme und Serien aus einem Stalker-Portal",
+  description: "Live-TV, Programm, Filme und Serien aus einem Portalen",
   preview: false,
   documentationURL: "https://github.com/hypersonic30/ha-stalker-card",
 });
