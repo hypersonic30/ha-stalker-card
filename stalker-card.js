@@ -1,5 +1,5 @@
 /* Stalker Card – Live-TV, Programm, Filme und Serien aus einem Stalker-Portal (Integration "stalker"). */
-const CARD_VERSION = "0.2.0";
+const CARD_VERSION = "0.3.0";
 const CARD_TAG = "stalker-card";
 const HLS_URL = "https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.17/hls.min.js";
 const PAGE = 60; // Filme je Seite (Server)
@@ -374,7 +374,8 @@ class StalkerCard extends HTMLElement {
 
   // ── Rendering ──────────────────────────────────────────────────────────
   _tabs() {
-    const list = [["live", "Live-TV", "mdi:television-classic"], ["guide", "Programm", "mdi:calendar-clock"]];
+    const list = [["live", "Live-TV", "mdi:television-classic"]];
+    if (this._info?.epg !== false) list.push(["guide", "Programm", "mdi:calendar-clock"]);
     if (this._info?.vod) list.push(["vod", "Filme", "mdi:movie-open"]);
     if (this._info?.series) list.push(["series", "Serien", "mdi:television-play"]);
     return list;
@@ -460,7 +461,7 @@ class StalkerCard extends HTMLElement {
     if (!this._live) return `<div class="sc-loading">Lade Kanäle …</div>`;
     const g = this._guide;
     const all = this._filteredChannels(true);
-    if (!all.length) return `${this._genreChips()}<div class="sc-empty">${Object.keys(this._now).length ? "Keine Kanäle gefunden." : "Das Portal liefert kein Programm."}</div>`;
+    if (!all.length) return `${this._genreChips()}<div class="sc-empty">${Object.keys(this._now).length ? "Keine Kanäle gefunden." : "Es sind keine Programminformationen verfügbar."}</div>`;
     if (!g.t0) g.t0 = Math.floor((Date.now() / 1000 - 3600) / 1800) * 1800;
     const t0 = g.t0;
     const px = GUIDE_PX_PER_MIN / 60;
@@ -531,7 +532,7 @@ class StalkerCard extends HTMLElement {
     const q = this._q.series.toLowerCase();
     const items = this._series.filter((s) => !q || s.title.toLowerCase().includes(q));
     return `${q ? "" : this._resumeRow("episode")}
-      ${items.length ? `<div class="sc-grid">${items.map((s) => this._tile(s, { kind: "series", action: "series", sub: `${s.episodes} Folgen` })).join("")}</div>` : `<div class="sc-empty">Keine Serien gefunden.</div>`}`;
+      ${items.length ? `<div class="sc-grid">${items.map((s) => this._tile(s, { kind: "series", action: "series", sub: s.episodes ? `${s.episodes} Folgen` : "" })).join("")}</div>` : `<div class="sc-empty">Keine Serien gefunden.</div>`}`;
   }
 
   // ── Detail sheets (movie, series, programme) ──────────────────────────────
@@ -590,7 +591,7 @@ class StalkerCard extends HTMLElement {
     return `<div class="sc-detail-top">${this._cover(s)}<div><div class="sc-detail-title">${esc(s.title)}</div>
         <div class="sc-pills"><span class="sc-pill">${s.seasons.length} ${s.seasons.length === 1 ? "Staffel" : "Staffeln"}</span><span class="sc-pill">${total} Folgen</span>
         ${seen ? `<span class="sc-pill ok">${seen} gesehen</span>` : ""}</div></div></div>
-      ${target ? `<div class="sc-actions"><button class="sc-btn" data-action="play_ep" data-id="${esc(target.id)}" data-start="${this._resumeStart(this._prog.items[pkey("episode", target.id)])}" data-title="${esc(s.title)}" data-sub="Staffel ${target.season} · Folge ${target.episode}"><ha-icon icon="mdi:play"></ha-icon>${esc(label)}</button></div>` : ""}
+      ${target ? `<div class="sc-actions"><button class="sc-btn" data-action="play_ep" data-sid="${esc(s.id)}" data-id="${esc(target.id)}" data-start="${this._resumeStart(this._prog.items[pkey("episode", target.id)])}" data-title="${esc(s.title)}" data-sub="Staffel ${target.season} · Folge ${target.episode}"><ha-icon icon="mdi:play"></ha-icon>${esc(label)}</button></div>` : ""}
       <div class="sc-seasons">${seasons}</div>`;
   }
 
@@ -599,11 +600,11 @@ class StalkerCard extends HTMLElement {
     const start = this._resumeStart(p);
     const pct = p?.dur && !p.done ? Math.min(100, (p.pos / p.dur) * 100) : 0;
     const s = this._detail.data;
-    return `<div class="sc-ep ${p?.done ? "done" : ""}" data-action="play_ep" data-id="${esc(e.id)}" data-start="${start}" data-title="${esc(s.title)}" data-sub="Staffel ${season} · Folge ${e.episode}">
+    return `<div class="sc-ep ${p?.done ? "done" : ""}" data-action="play_ep" data-sid="${esc(s.id)}" data-id="${esc(e.id)}" data-start="${start}" data-title="${esc(s.title)}" data-sub="Staffel ${season} · Folge ${e.episode}">
       <span class="sc-ep-num">${e.episode}</span>
       <div class="sc-ep-main">Folge ${e.episode}${start ? `<small> · ab ${fmtTime(start)}</small>` : ""}${pct ? `<div class="sc-meter"><div style="width:${pct.toFixed(0)}%"></div></div>` : ""}</div>
-      ${start ? `<button class="sc-btn secondary small" data-action="play_ep" data-id="${esc(e.id)}" data-start="0" data-title="${esc(s.title)}" data-sub="Staffel ${season} · Folge ${e.episode}">Von vorn</button>` : ""}
-      <button class="sc-mark" data-action="mark" data-kind="episode" data-id="${esc(e.id)}" data-done="${p?.done ? "0" : "1"}" aria-label="${p?.done ? "Als ungesehen markieren" : "Als gesehen markieren"}"><ha-icon icon="${p?.done ? "mdi:check-circle" : "mdi:circle-outline"}"></ha-icon></button></div>`;
+      ${start ? `<button class="sc-btn secondary small" data-action="play_ep" data-sid="${esc(s.id)}" data-id="${esc(e.id)}" data-start="0" data-title="${esc(s.title)}" data-sub="Staffel ${season} · Folge ${e.episode}">Von vorn</button>` : ""}
+      <button class="sc-mark" data-action="mark" data-kind="episode" data-sid="${esc(s.id)}" data-id="${esc(e.id)}" data-done="${p?.done ? "0" : "1"}" aria-label="${p?.done ? "Als ungesehen markieren" : "Als gesehen markieren"}"><ha-icon icon="${p?.done ? "mdi:check-circle" : "mdi:circle-outline"}"></ha-icon></button></div>`;
   }
 
   _programmeSheet(d) {
@@ -734,10 +735,10 @@ class StalkerCard extends HTMLElement {
 
   async _a_mark(el, ev) {
     ev.stopPropagation();
-    const { kind, id } = el.dataset;
+    const { kind, id, sid } = el.dataset;
     const done = el.dataset.done === "1";
     try {
-      await this._api("POST", "progress", { kind, id, done });
+      await this._api("POST", "progress", { kind, id, done, ...(sid ? { sid } : {}) });
       await this._loadProgress();
     } catch (e) { this._error = errMessage(e); this._render(); }
   }
@@ -755,7 +756,7 @@ class StalkerCard extends HTMLElement {
   }
   _a_play_ep(el, ev) {
     ev.stopPropagation();
-    this._play("episode", el.dataset.id, el.dataset.title, el.dataset.sub, Number(el.dataset.start) || 0, {});
+    this._play("episode", el.dataset.id, el.dataset.title, el.dataset.sub, Number(el.dataset.start) || 0, { sid: el.dataset.sid });
   }
 
   // ── Player ───────────────────────────────────────────────────────────
@@ -764,11 +765,12 @@ class StalkerCard extends HTMLElement {
     this._flushReport();
     this._teardownVideo();
     const keep = extra.list ? extra : { list: this._player?.list, logo: this._player?.logo };
-    this._player = { kind, id, title, sub, loading: true, start: start || 0, list: keep.list, logo: keep.logo };
+    const sid = extra.sid ?? (this._player?.id === id ? this._player.sid : undefined);
+    this._player = { kind, id, title, sub, sid, loading: true, start: start || 0, list: keep.list, logo: keep.logo };
     this._renderPlayer();
     if (!this._playerDialog.open) this._playerDialog.showModal();
     try {
-      const r = await this._api("POST", "play", { kind, id, start: start || 0, ...(this._canHevc() ? { hevc: true } : {}) });
+      const r = await this._api("POST", "play", { kind, id, start: start || 0, ...(sid ? { sid } : {}), ...(this._canHevc() ? { hevc: true } : {}) });
       if (!this._player || this._player.id !== id) return;
       this._player = { ...this._player, session: r.session, url: r.url, live: r.live, duration: r.duration, start: r.start || 0, transcoding: r.transcoding, loading: false };
       this._renderPlayer();
@@ -823,7 +825,7 @@ class StalkerCard extends HTMLElement {
     this._recoveries.push(now);
     const video = this._overlayRoot.querySelector("video");
     const pos = p.live === false ? p.start + (video?.currentTime || 0) : 0;
-    this._play(p.kind, p.id, p.title, p.sub, Math.floor(pos));
+    this._play(p.kind, p.id, p.title, p.sub, Math.floor(pos), { sid: p.sid });
   }
 
   _renderPlayer() {
@@ -891,7 +893,7 @@ class StalkerCard extends HTMLElement {
   _restartAt(value) {
     this._dragging = false;
     const p = this._player;
-    if (p) this._play(p.kind, p.id, p.title, p.sub, value);
+    if (p) this._play(p.kind, p.id, p.title, p.sub, value, { sid: p.sid });
   }
 
   // Watch progress: every 15 s while playing, and when pausing, ending or closing.
@@ -905,15 +907,15 @@ class StalkerCard extends HTMLElement {
     this._lastReport = now;
     const pos = ended ? p.duration : Math.min(p.duration, p.start + video.currentTime);
     if (!isFinite(pos)) return;
-    this._sendProgress(p.kind, p.id, pos, p.duration);
+    this._sendProgress(p.kind, p.id, pos, p.duration, p.sid);
   }
 
   _flushReport() { this._report(true); }
 
-  _sendProgress(kind, id, pos, dur) {
+  _sendProgress(kind, id, pos, dur, sid) {
     const key = pkey(kind, id);
     this._prog.items[key] = { pos: Math.floor(pos), dur: Math.floor(dur), done: dur > 0 && pos >= dur * 0.92 };
-    this._api("POST", "progress", { kind, id, pos, dur }).catch(() => {});
+    this._api("POST", "progress", { kind, id, pos, dur, ...(sid ? { sid } : {}) }).catch(() => {});
   }
 
   async _pollEpg(channelId) {

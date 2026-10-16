@@ -30,17 +30,21 @@ with sync_playwright() as p:
     pg.locator(O + ".sc-ep", has_text="Folge 2").click()
     pg.wait_for_function("() => { const v = document.querySelector('.stalker-card-overlay').shadowRoot.querySelector('video'); return v && v.currentTime > 1 }", timeout=30000)
     pl = [c for c in calls() if c[1] == "play"][-1][2]
-    check("episode plays by id", pl["kind"] == "episode" and pl["id"] == "f2", pl)
+    check("episode plays by id and names its series", pl["kind"] == "episode" and pl["id"] == "f2" and pl["sid"] == "s1", pl)
     check("player names series and episode", "Bleach" in pg.inner_text(O + ".sc-ptitle") and "Staffel 2" in pg.inner_text(O + ".sc-ptitle"))
     pg.wait_for_timeout(500)
     pg.locator(O + "[data-action=close_player]").click()
     pg.wait_for_timeout(900)
+    rep = [c for c in calls() if c[:2] == ("POST", "progress") and c[2].get("id") == "f2" and "pos" in c[2]]
+    check("progress reports of an episode carry the series id", rep and rep[-1][2]["sid"] == "s1", rep[-1:])
     check("sheet is still there after the player closes", pg.evaluate("() => document.querySelector('.stalker-card-overlay').shadowRoot.getElementById('sc-detail').open"))
     check("partly watched episode offers resume + Von vorn", "Von vorn" in pg.inner_text(O + ".sc-eps") or STATE["progress"].get("episode:f2", {}).get("pos", 0) < 30)
     # mark watched with the check button; the toggle does not start playback
     n = len([c for c in calls() if c[1] == "play"])
     pg.locator(O + ".sc-ep", has_text="Folge 1").locator("[data-action=mark]").click()
     pg.wait_for_timeout(600)
+    mk = [c for c in calls() if c[:2] == ("POST", "progress") and c[2].get("done") is True]
+    check("mark requests carry the series id", mk and mk[-1][2].get("sid") == "s1", mk[-1:])
     check("check button marks watched without playing", len([c for c in calls() if c[1] == "play"]) == n and STATE["progress"].get("episode:f1", {}).get("done") is True)
     check("watched count shown", "1 gesehen" in pg.inner_text(O + ".sc-pills"))
     # next episode suggestion: S1 finished episodes

@@ -7,6 +7,12 @@ with sync_playwright() as p:
     open_card(pg)
     check("only Live-TV and Programm without playlists", pg.locator("stalker-card >> .sc-tab").all_inner_texts() == ["Live-TV", "Programm"])
     b.close()
+    b, pg, errors = browser_page(p)
+    reset()
+    STATE["info"] = {"vod": True, "series": False, "epg": False, "max_streams": 1}
+    open_card(pg)
+    check("no Programm tab for sources without a guide", pg.locator("stalker-card >> .sc-tab").all_inner_texts() == ["Live-TV", "Filme"])
+    b.close()
     b, pg, errors = browser_page(p, width=360)
     reset()
     open_card(pg)

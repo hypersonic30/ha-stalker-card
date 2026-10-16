@@ -16,4 +16,5 @@ title: Fernsehen
 - Tabs „Filme“ und „Serien“ erscheinen nur, wenn die Integration die Listen kennt.
 - Wiedergabe als HLS (nativ in Safari/iOS, sonst hls.js per CDN). Bei Filmen gibt es eine Zeitleiste; Spulen startet den Stream an der Stelle neu.
 - Pausierst du lange, stoppt der Server den Stream; die Karte startet dann an der letzten Position neu.
-- Braucht die Integration `stalker` ab 0.2.0.
+- Braucht die Integration `stalker` ab 0.2.0 (HEVC-Direktwiedergabe, M3U/XMLTV und Xtream ab 0.3.0).
+- Ohne Programmdaten (z. B. M3U ohne XMLTV) fehlt der Tab „Programm“.

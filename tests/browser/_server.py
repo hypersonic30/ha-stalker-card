@@ -143,7 +143,7 @@ def browser_page(p, width=900):
     b = p.chromium.launch(channel="chrome", headless=True, args=["--autoplay-policy=no-user-gesture-required"])
     pg = b.new_page(viewport={"width": width, "height": 900})
     if os.environ.get("STALKER_FORCE_HLSJS"):  # what Android WebView / Firefox report: no native HLS
-        pg.add_init_script("HTMLMediaElement.prototype.canPlayType = function (t) { return /mpegurl/i.test(t) ? '' : 'maybe'; }")
+        pg.add_init_script("HTMLMediaElement.prototype.canPlayType = function (t) { return /mpegurl|hvc1|hev1/i.test(t) ? '' : 'maybe'; }")
     errors = []
     pg.on("pageerror", lambda e: errors.append(str(e)))
     return b, pg, errors
