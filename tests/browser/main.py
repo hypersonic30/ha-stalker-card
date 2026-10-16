@@ -29,6 +29,10 @@ with sync_playwright() as p:
     pg.fill(C + "input[data-q]", "")
     pg.locator(C + ".sc-chip", has_text="Sport").click()
     check("genre chip halves the list", pg.locator(C + ".sc-ch").count() == 80 and pg.locator(C + "[data-action=more]").count() == 1)
+    chips = pg.evaluate("""() => [...card.shadowRoot.querySelectorAll('.sc-chip')].slice(0, 3).map(e => {
+      const r = e.getBoundingClientRect(), s = getComputedStyle(e), i = e.querySelector('ha-icon');
+      const ir = i && i.getBoundingClientRect(); return { h: Math.round(r.height), fs: s.fontSize, off: ir ? Math.abs((ir.top + ir.height / 2) - (r.top + r.height / 2)) : 0 }; })""")
+    check("Favoriten chip has the same size and font as the others, star centred", len({(c["h"], c["fs"]) for c in chips}) == 1 and all(c["off"] <= 1.5 for c in chips), chips)
     pg.locator(C + ".sc-chip", has_text="Alle").click()
 
     # play live in the fullscreen player
@@ -40,6 +44,12 @@ with sync_playwright() as p:
     pg.wait_for_function("() => document.querySelector('.stalker-card-overlay').shadowRoot.getElementById('sc-epg').textContent.includes('Tagesschau')", timeout=5000)
     check("EPG now/next shown", "danach" in pg.inner_text(O + "#sc-epg"))
     check("live has native controls, no seek bar", pg.locator(O + "input[data-seek]").count() == 0)
+    geo = pg.evaluate("""() => { const r = document.querySelector('.stalker-card-overlay').shadowRoot;
+      const d = r.getElementById('sc-player').getBoundingClientRect(), v = r.querySelector('#sc-player video').getBoundingClientRect(),
+        top = r.querySelector('.sc-ptop').getBoundingClientRect();
+      return { dh: d.height, vh: innerHeight, vTop: v.top, tBottom: top.bottom }; }""")
+    check("player is a window, not forced fullscreen", geo["dh"] < geo["vh"] - 20, geo)
+    check("title bar does not cover the video (native controls stay reachable)", geo["tBottom"] <= geo["vTop"] + 1, geo)
     pg.locator(O + "[data-action=chan][data-dir='1']").click()
     pg.wait_for_function(PLAY_OK % "1", timeout=30000)
     check("next channel button switches to the next channel", ("POST", "play", {"kind": "live", "id": "4", "start": 0}) in calls(), [c for c in calls() if c[1] == "play"])

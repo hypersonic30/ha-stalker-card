@@ -1,5 +1,5 @@
 /* Stalker Card – Live-TV, Programm, Filme und Serien aus einem oder mehreren Portalen (Integration "stalker"). */
-const CARD_VERSION = "0.4.0";
+const CARD_VERSION = "0.4.1";
 const CARD_TAG = "stalker-card";
 const HLS_URL = "https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.17/hls.min.js";
 const PAGE = 60; // Filme je Seite (Server)
@@ -98,7 +98,7 @@ const STYLE = `
   .sc-searchbar input:focus { outline: 2px solid color-mix(in srgb, var(--sc-accent) 60%, transparent); }
   .sc-body { padding: 12px 16px 18px; display: flex; flex-direction: column; gap: 14px; }
   .sc-chips { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; scrollbar-width: none; }
-  .sc-chip { flex: 0 0 auto; min-height: 36px; padding: 6px 14px; border-radius: 999px; cursor: pointer; font: inherit; font-size: 0.88em; font-weight: 600;
+  .sc-chip { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; line-height: 1.2; min-height: 36px; padding: 6px 14px; border-radius: 999px; cursor: pointer; font: inherit; font-size: 0.88em; font-weight: 600;
     border: 1px solid var(--sc-line); background: var(--sc-soft); color: var(--primary-text-color); }
   .sc-chip.active { background: color-mix(in srgb, var(--sc-accent) 90%, transparent); color: white; border-color: transparent; }
   .sc-section { font-size: 0.78em; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--secondary-text-color); margin: 4px 2px 0; }
@@ -137,7 +137,7 @@ const STYLE = `
   .sc-fav { flex: none; width: 46px; border-radius: var(--sc-radius-md); cursor: pointer; color: var(--secondary-text-color);
     background: var(--sc-soft); border: 1px solid var(--sc-line); display: inline-flex; align-items: center; justify-content: center; }
   .sc-fav.on { color: #ffcc00; }
-  .sc-chip ha-icon { --mdc-icon-size: 16px; margin-right: 4px; vertical-align: -3px; }
+  .sc-chip ha-icon { --mdc-icon-size: 16px; display: inline-flex; margin-right: 4px; }
   .sc-ch.on { background: color-mix(in srgb, var(--sc-accent) 14%, var(--sc-soft)); }
   .sc-logo { width: 46px; height: 46px; flex: none; border-radius: 10px; background: color-mix(in srgb, var(--primary-text-color) 8%, transparent);
     display: flex; align-items: center; justify-content: center; overflow: hidden; font-size: 0.7em; color: var(--secondary-text-color); }
@@ -172,7 +172,8 @@ const STYLE = `
   dialog.sc-dialog { padding: 0; border: none; background: transparent; max-width: 100vw; max-height: 100dvh; color: var(--primary-text-color);
     font-family: var(--paper-font-body1_-_font-family, -apple-system, "SF Pro Text", "Segoe UI", system-ui, sans-serif); }
   dialog.sc-dialog::backdrop { background: rgba(0, 0, 0, 0.55); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
-  dialog.sc-dialog.sc-full { width: 100vw; height: 100dvh; max-width: none; max-height: none; margin: 0; background: #000; color: white; }
+  dialog.sc-dialog.sc-full { width: min(1000px, 100vw); max-width: 100vw; max-height: 100dvh; margin: auto; background: #000; color: white; overflow: hidden; border-radius: var(--sc-radius-lg); }
+  @media (max-width: 600px) { dialog.sc-dialog.sc-full { border-radius: 0; } }
   dialog.sc-dialog.sc-full::backdrop { background: rgba(0, 0, 0, 0.7); }
   .sc-sheet { position: relative; width: min(560px, 100vw); max-height: 92dvh; overflow-y: auto; border-radius: var(--sc-radius-lg);
     background: color-mix(in srgb, var(--card-background-color, #1c1c1e) 94%, transparent); box-shadow: 0 30px 60px rgba(0,0,0,0.45);
@@ -212,10 +213,11 @@ const STYLE = `
   .sc-ep.done .sc-mark { color: #34c759; }
 
   /* player */
-  .sc-player { position: relative; width: 100vw; height: 100dvh; display: flex; flex-direction: column; background: #000; }
-  .sc-player video { flex: 1; min-height: 0; width: 100%; background: #000; }
-  .sc-ptop { position: absolute; top: 0; left: 0; right: 0; z-index: 3; display: flex; align-items: center; gap: 10px; padding: calc(10px + env(safe-area-inset-top)) 12px 24px;
-    background: linear-gradient(to bottom, rgba(0,0,0,0.75), transparent); }
+  /* title bar and seek bar sit beside the video, never over it: the native controls (AirPlay, cast, fullscreen) stay reachable */
+  .sc-player { position: relative; width: 100%; display: flex; flex-direction: column; background: #000; }
+  .sc-player video { display: block; width: 100%; aspect-ratio: 16 / 9; max-height: calc(100dvh - 150px); min-height: 0; background: #000; }
+  .sc-ptop { position: relative; z-index: 3; display: flex; align-items: center; gap: 10px; padding: calc(10px + env(safe-area-inset-top)) 12px 10px;
+    background: rgba(0,0,0,0.85); }
   .sc-ptitle { flex: 1; min-width: 0; }
   .sc-ptitle b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sc-ptitle small { display: block; opacity: 0.8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -937,7 +939,6 @@ class StalkerCard extends HTMLElement {
     const list = p.list || [];
     const idx = list.indexOf(p.id);
     dlg.innerHTML = `<div class="sc-player">
-      <video playsinline ${live ? "controls" : ""} autoplay></video>
       <div class="sc-ptop">
         ${live && list.length > 1 ? `<button class="sc-pbtn" data-action="chan" data-dir="-1" aria-label="Voriger Sender"><ha-icon icon="mdi:skip-previous"></ha-icon></button>` : ""}
         <div class="sc-ptitle"><b>${esc(p.title)}</b><small id="sc-epg">${esc(p.sub || "")}${p.transcoding ? " · umkodiert (720p)" : ""}</small></div>
@@ -945,13 +946,18 @@ class StalkerCard extends HTMLElement {
         ${live ? `<button class="sc-pbtn" id="sc-pfav" data-action="fav" data-id="${esc(p.id)}"></button>` : ""}
         <button class="sc-pbtn" data-action="close_player" aria-label="Schließen"><ha-icon icon="mdi:close"></ha-icon></button>
       </div>
+      <video playsinline x-webkit-airplay="allow" ${live ? "controls" : ""} autoplay></video>
       ${p.loading ? `<div class="sc-spin">Stream startet …${p.kind !== "live" ? `<small>Der erste Start kann bis zu einer halben Minute dauern.</small>` : ""}</div>` : ""}
       ${p.error ? `<div class="sc-spin">${esc(p.error)}<button class="sc-btn" data-action="close_player">Schließen</button></div>` : ""}
       ${vod && p.duration ? `<div class="sc-pbar"><button class="sc-pbtn" data-action="toggle" aria-label="Pause/Weiter"><ha-icon icon="mdi:play-pause"></ha-icon></button>
         <span id="sc-cur">${fmtTime(p.start)}</span>
         <input data-seek type="range" min="0" max="${Math.floor(p.duration)}" step="5" value="${Math.floor(p.start)}" aria-label="Position">
-        <span>${fmtTime(p.duration)}</span></div>` : ""}</div>`;
+        <span>${fmtTime(p.duration)}</span>
+        <button class="sc-pbtn" id="sc-pcast" data-action="cast" aria-label="AirPlay / Streamen" hidden><ha-icon icon="mdi:cast"></ha-icon></button>
+        <button class="sc-pbtn" data-action="fullscreen" aria-label="Vollbild"><ha-icon icon="mdi:fullscreen"></ha-icon></button></div>` : ""}</div>`;
     const video = dlg.querySelector("video");
+    const cast = dlg.querySelector("#sc-pcast");
+    if (cast && (typeof video.webkitShowPlaybackTargetPicker === "function" || video.remote?.prompt)) cast.hidden = false;
     if (vod) {
       video.addEventListener("timeupdate", () => { this._tick(video); this._report(false); });
       video.addEventListener("pause", () => this._report(true));
@@ -976,6 +982,18 @@ class StalkerCard extends HTMLElement {
     const next = p.list[(i + Number(el.dataset.dir) + p.list.length) % p.list.length];
     const c = this._live?.channels.find((x) => x.id === next);
     if (c) this._play("live", c.id, c.name, "", 0, { list: p.list, logo: c.logo });
+  }
+
+  _a_cast() {
+    const v = this._playerDialog.querySelector("video");
+    if (typeof v?.webkitShowPlaybackTargetPicker === "function") v.webkitShowPlaybackTargetPicker();
+    else v?.remote?.prompt?.().catch(() => {});
+  }
+
+  _a_fullscreen() {
+    const v = this._playerDialog.querySelector("video");
+    if (v?.requestFullscreen) v.requestFullscreen().catch(() => {});
+    else v?.webkitEnterFullscreen?.(); // iOS only fullscreens the video element itself
   }
 
   _a_close_player() { this._playerDialog.close(); }
