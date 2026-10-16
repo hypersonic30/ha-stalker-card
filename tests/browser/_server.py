@@ -23,11 +23,24 @@ def reset():
     STATE.update(calls=[], info={"vod": True, "series": True, "max_streams": 1}, play_error=None, session=0,
                  transcoding=False, progress={}, resume=[], long_season=False,
                  portals=[{"id": "p1", "title": "Zuhause", "source": "stalker"}], channels_by={}, info_by={}, favs={},
-                 seen=[], delay={}, fav_error=None, progress_by={}, tracks=None)
+                 seen=[], delay={}, fav_error=None, progress_by={}, tracks=None, multi=False)
 
 
 def calls():
     return list(STATE["calls"])
+
+
+def make_multi_hls():
+    d = os.path.join(HLS_DIR, "m")
+    if os.path.exists(os.path.join(d, "index.m3u8")):
+        return
+    os.makedirs(d, exist_ok=True)
+    subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25",
+                    "-f", "lavfi", "-i", "sine=frequency=440", "-f", "lavfi", "-i", "sine=frequency=880", "-t", "20",
+                    "-map", "0:v", "-map", "1:a", "-map", "2:a", "-c:v", "libx264", "-preset", "ultrafast", "-g", "25", "-c:a", "aac",
+                    "-f", "hls", "-hls_time", "2", "-hls_list_size", "0", "-hls_playlist_type", "vod", "-master_pl_name", "index.m3u8",
+                    "-var_stream_map", "v:0,agroup:aud,name:v a:0,agroup:aud,name:a0,language:ger,default:yes a:1,agroup:aud,name:a1,language:eng",
+                    "-hls_segment_filename", os.path.join(d, "seg_%v_%d.ts"), os.path.join(d, "%v.m3u8")], check=True)
 
 
 def make_hls():
@@ -66,7 +79,7 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/stalker-card.js":
             return self._send(200, open(CARD, "rb").read(), "application/javascript")
         if p.startswith("/api/stalker/hls/"):
-            f = os.path.join(HLS_DIR, os.path.basename(p))
+            f = os.path.join(HLS_DIR, "m" if STATE.get("multi") else "", os.path.basename(p))
             ct = "application/vnd.apple.mpegurl" if f.endswith(".m3u8") else "video/mp2t"
             return self._send(200, open(f, "rb").read(), ct) if os.path.isfile(f) else self._send(404, {})
         if not p.startswith("/api/stalker/"):
@@ -138,7 +151,7 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._send(200, {"session": f"sess{STATE['session']}", "live": live, "duration": None if live else 300.0,
                                     "start": body.get("start", 0), "transcoding": STATE["transcoding"], "url": "/api/stalker/hls/index.m3u8",
                                     **({"audio": STATE["tracks"]["audio"], "subs": STATE["tracks"]["subs"],
-                                        "audio_index": body.get("audio", STATE["tracks"]["audio"][0]["index"])} if STATE["tracks"] else {})})
+                                        "audio_index": body.get("audio", STATE["tracks"]["audio"][0]["index"]), "multi_audio": bool(STATE.get("multi"))} if STATE["tracks"] else {})})
         if r == "progress":
             key = f"{body['kind']}:{body['id']}"
             if "done" in body:
@@ -157,6 +170,7 @@ class H(http.server.BaseHTTPRequestHandler):
 
 def serve():
     make_hls()
+    make_multi_hls()
     reset()
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()

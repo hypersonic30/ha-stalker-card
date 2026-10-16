@@ -1,3 +1,5 @@
+import os
+os.environ["STALKER_FORCE_HLSJS"] = "1"  # audio renditions are switched through hls.js here
 from _server import *
 
 C, O = "stalker-card >> ", ".stalker-card-overlay >> "
@@ -5,13 +7,14 @@ PLAYING = "() => { const v = document.querySelector('.stalker-card-overlay').sha
 CUES = "() => { const v = document.querySelector('.stalker-card-overlay').shadowRoot.querySelector('video'); const t = [...v.textTracks].find(x => x.label === 'sc'); return t ? [t.mode, [...(t.cues || [])].map(c => c.text)] : null }"
 
 serve()
-open(os.path.join(HLS_DIR, "sub4.vtt"), "w").write("WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nHallo {\\an8}Welt\n\n2\n00:00:05,000 --> 00:00:07,000\nZweite Zeile\n")
-open(os.path.join(HLS_DIR, "sub5.vtt"), "w").write("WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nHello world\n")
+open(os.path.join(HLS_DIR, "m", "sub4.vtt"), "w").write("WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nHallo {\\an8}Welt\n\n2\n00:00:05,000 --> 00:00:07,000\nZweite Zeile\n")
+open(os.path.join(HLS_DIR, "m", "sub5.vtt"), "w").write("WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nHello world\n")
 with sync_playwright() as p:
     b, pg, errors = browser_page(p, width=420)
     pg.add_init_script("localStorage.removeItem('sc-sub')")
     STATE["tracks"] = {"audio": [{"index": 1, "lang": "ger", "codec": "ac3"}, {"index": 2, "lang": "eng", "codec": "dts"}],
                        "subs": [{"index": 4, "lang": "ger"}, {"index": 5, "lang": "eng"}]}
+    STATE["multi"] = True
     open_card(pg)
     pg.locator(C + ".sc-tab", has_text="Filme").click()
     pg.wait_for_selector(C + ".sc-grid .sc-tile")
@@ -27,17 +30,25 @@ with sync_playwright() as p:
     pg.locator(O + "[data-action=menu][data-menu=audio]").click()
     txt = pg.inner_text(O + ".sc-pmenu[data-menu=audio]")
     check("audio menu names languages", "Deutsch" in txt and "Englisch" in txt and pg.locator(O + ".sc-pmenu[data-menu=audio] button.on").inner_text().startswith("Deutsch"), txt)
+    nplay = len([c for c in calls() if c[1] == "play"])
     pg.locator(O + "[data-action=pick_audio][data-idx='2']").click()
-    pg.wait_for_function(PLAYING % "0.5", timeout=30000)
-    pl = [c for c in calls() if c[1] == "play"]
-    check("picking a track restarts the stream with that track", pl[-1][2].get("audio") == 2 and "start" in pl[-1][2], pl[-1])
-    pg.wait_for_selector(O + "[data-action=menu][data-menu=audio]")
+    pg.wait_for_function("() => card._hls && card._hls.audioTrack === 1", timeout=10000)
+    pg.wait_for_timeout(2500)
+    check("with audio renditions the switch needs no new stream", len([c for c in calls() if c[1] == "play"]) == nplay)
+    check("the player fetches the other audio rendition", pg.evaluate("() => performance.getEntriesByType('resource').some(e => e.name.includes('seg_a1_'))"))
     pg.locator(O + "[data-action=menu][data-menu=audio]").click()
     check("chosen track is marked", pg.locator(O + ".sc-pmenu[data-menu=audio] button.on").inner_text().startswith("Englisch"))
     pg.locator(O + "[data-action=menu][data-menu=audio]").click()
-    pg.evaluate("() => { const s = document.querySelector('.stalker-card-overlay').shadowRoot.querySelector('input[data-seek]'); s.value = 120; s.dispatchEvent(new Event('input', {bubbles:true})); s.dispatchEvent(new Event('change', {bubbles:true})); }")
-    pg.wait_for_timeout(1200)
-    check("the chosen track survives seeking", [c for c in calls() if c[1] == "play"][-1][2].get("audio") == 2)
+    seek = "(v) => { const s = document.querySelector('.stalker-card-overlay').shadowRoot.querySelector('input[data-seek]'); s.value = v; s.dispatchEvent(new Event('input', {bubbles:true})); s.dispatchEvent(new Event('change', {bubbles:true})); }"
+    pg.evaluate(seek, 10)
+    pg.wait_for_timeout(1500)
+    check("seeking inside the held window needs no new stream", len([c for c in calls() if c[1] == "play"]) == nplay)
+    cur = pg.evaluate("() => document.querySelector('.stalker-card-overlay').shadowRoot.querySelector('video').currentTime")
+    check("... and really jumps there", 9 <= cur <= 13, cur)
+    pg.evaluate(seek, 120)
+    pg.wait_for_timeout(1500)
+    pl = [c for c in calls() if c[1] == "play"]
+    check("seeking far away starts a new stream that keeps the chosen track", len(pl) == nplay + 1 and pl[-1][2].get("audio") == 2 and pl[-1][2]["start"] == 120, pl[-1])
     pg.wait_for_function(PLAYING % "0.5", timeout=30000)
     check("subtitles are off at first", pg.evaluate(CUES) is None or pg.evaluate(CUES)[0] != "showing")
     pg.locator(O + "[data-action=menu][data-menu=sub]").click()
@@ -51,6 +62,14 @@ with sync_playwright() as p:
     pg.wait_for_function(CUES.replace("return t ?", "return t && t.cues.length ?"), timeout=10000)
     check("switching subtitles replaces the cues", pg.evaluate(CUES)[1] == ["Hello world"], pg.evaluate(CUES))
     pg.locator(O + "[data-action=menu][data-menu=sub]").click()
+    pg.locator(O + "[data-action=pick_sub][data-idx='4']").click()
+    pg.wait_for_function(CUES.replace("return t ?", "return t && t.cues.length ?"), timeout=10000)
+    pg.locator(O + "[data-action=menu][data-menu=sub]").click()
+    for _ in range(3):
+        pg.locator(O + "[data-action=sub_delay][data-d='-0.5']").click()
+    pg.wait_for_function("() => { const v = document.querySelector('.stalker-card-overlay').shadowRoot.querySelector('video'); const t = [...v.textTracks].find(x => x.label === 'sc'); return t && t.cues.length === 2 && Math.abs(t.cues[0].startTime - 0) < 0.01 }", timeout=10000)
+    check("subtitle offset shifts the cues and shows the value", "−1,5 s" in pg.inner_text(O + "#sc-delay"))
+    check("the cues are not duplicated by changing the offset", len(pg.evaluate(CUES)[1]) == 2)
     pg.locator(O + "[data-action=pick_sub][data-idx='']").click()
     check("Aus hides the subtitles", pg.evaluate(CUES)[0] == "disabled" and pg.evaluate(CUES)[1] == [])
     pg.locator(O + "[data-action=close_player]").click()
@@ -62,6 +81,22 @@ with sync_playwright() as p:
     pg.locator(O + "[data-action=play_vod]").first.click()
     pg.wait_for_selector(O + "input[data-seek]")
     check("no track buttons without tracks", pg.locator(O + "[data-action=menu]").count() == 0)
+    pg.locator(O + "[data-action=close_player]").click()
+    pg.locator(O + "[data-action=close_detail]").click()
+    pg.wait_for_timeout(300)
+    STATE["multi"] = False  # a stream with plain audio (old server): changing the track has to start a new stream
+    STATE["tracks"] = {"audio": [{"index": 1, "lang": "ger", "codec": "ac3"}, {"index": 2, "lang": "eng", "codec": "dts"}], "subs": []}
+    pg.locator(C + ".sc-grid .sc-tile").click()
+    pg.wait_for_selector(O + ".sc-sheet")
+    pg.locator(O + "[data-action=play_vod]").first.click()
+    pg.wait_for_selector(O + "[data-action=menu][data-menu=audio]")
+    pg.wait_for_function(PLAYING % "1", timeout=30000)
+    n = len([c for c in calls() if c[1] == "play"])
+    pg.locator(O + "[data-action=menu][data-menu=audio]").click()
+    pg.locator(O + "[data-action=pick_audio][data-idx='2']").click()
+    pg.wait_for_function(PLAYING % "0.5", timeout=30000)
+    pl = [c for c in calls() if c[1] == "play"]
+    check("without renditions a track change restarts the stream with that track", len(pl) == n + 1 and pl[-1][2].get("audio") == 2, pl[-1])
     check("no page errors", not errors, errors)
     b.close()
 finish()
