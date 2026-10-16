@@ -3,7 +3,7 @@
 `from _server import *` in each test script. `calls()` lists every API request the card made.
 Real HLS (h264+aac, made with ffmpeg) is served so Chrome really plays it.
 """
-import http.server, json, os, shutil, subprocess, sys, tempfile, threading, urllib.parse
+import http.server, json, os, shutil, subprocess, sys, tempfile, threading, time, urllib.parse
 from playwright.sync_api import sync_playwright
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -20,7 +20,8 @@ STATE = {}
 
 def reset():
     STATE.clear()
-    STATE.update(calls=[], info={"vod": True, "series": True, "max_streams": 1}, play_error=None, session=0)
+    STATE.update(calls=[], info={"vod": True, "series": True, "max_streams": 1}, play_error=None, session=0,
+                 transcoding=False, progress={}, resume=[], long_season=False)
 
 
 def calls():
@@ -74,6 +75,20 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._send(200, STATE["info"])
         if r == "live":
             return self._send(200, {"genres": [{"id": "*", "title": "Alle"}, {"id": "1", "title": "News"}, {"id": "2", "title": "Sport"}], "channels": CHANNELS})
+        if r == "nowplaying":
+            now = int(time.time())
+            return self._send(200, {"items": {c["id"]: {"t": "Tagesschau", "s": now - 600, "e": now + 600, "n": "Wetter", "ns": now + 600}
+                                              for c in CHANNELS if c["has_epg"]}})
+        if r == "guide":
+            t0 = int(float(q["from"][0])); t1 = int(float(q["to"][0]))
+            items = {}
+            for cid in q["ids"][0].split(","):
+                base = t0 // 3600 * 3600
+                items[cid] = [{"t": f"Sendung {k} K{cid} <u>x</u>", "d": f"Beschreibung <b>{k}</b>", "s": base + k * 3600, "e": base + (k + 1) * 3600}
+                              for k in range(0, (t1 - base) // 3600 + 1) if base + (k + 1) * 3600 > t0]
+            return self._send(200, {"items": items})
+        if r == "progress":
+            return self._send(200, {"items": STATE["progress"], "resume": STATE["resume"]})
         if r.startswith("epg/"):
             return self._send(200, {"items": [{"title": "Tagesschau", "descr": "", "start": 0, "stop": 9999999999},
                                               {"title": "Wetter", "descr": "", "start": 9999999999, "stop": 9999999999 + 600}]})
@@ -82,10 +97,11 @@ class H(http.server.BaseHTTPRequestHandler):
             page, size = int(q.get("page", ["1"])[0]), int(q.get("size", ["60"])[0])
             return self._send(200, {"groups": ["Action", "Drama"], "total": len(items), "page": page, "items": items[(page - 1) * size: page * size]})
         if r == "series":
-            return self._send(200, {"items": [{"id": "s1", "title": "Bleach", "logo": "", "group": "ANIME", "episodes": 3}]})
+            return self._send(200, {"items": [{"id": "s1", "title": "Bleach", "logo": "", "group": "ANIME", "episodes": 63}]})
         if r == "series/s1":
-            return self._send(200, {"id": "s1", "title": "Bleach", "logo": "", "seasons": [{"season": 1, "episodes": [
-                {"id": f"e{n}", "episode": n, "title": f"Bleach S01E0{n}"} for n in (1, 2, 3)]}]})
+            return self._send(200, {"id": "s1", "title": "Bleach", "logo": "", "seasons": [
+                {"season": 1, "episodes": [{"id": f"e{n}", "episode": n, "title": f"Bleach S01E{n:02d}"} for n in range(1, 61)]},
+                {"season": 2, "episodes": [{"id": f"f{n}", "episode": n, "title": f"Bleach S02E{n:02d}"} for n in (1, 2, 3)]}]})
         return self._send(404, {})
 
     def do_POST(self):
@@ -98,7 +114,18 @@ class H(http.server.BaseHTTPRequestHandler):
             STATE["session"] += 1
             live = body["kind"] == "live"
             return self._send(200, {"session": f"sess{STATE['session']}", "live": live, "duration": None if live else 300.0,
-                                    "start": body.get("start", 0), "url": "/api/stalker/hls/index.m3u8"})
+                                    "start": body.get("start", 0), "transcoding": STATE["transcoding"], "url": "/api/stalker/hls/index.m3u8"})
+        if r == "progress":
+            key = f"{body['kind']}:{body['id']}"
+            if "done" in body:
+                if body["done"]:
+                    old = STATE["progress"].get(key, {"dur": 100})
+                    STATE["progress"][key] = {"pos": old["dur"], "dur": old["dur"], "done": True, "t": time.time()}
+                else:
+                    STATE["progress"].pop(key, None)
+            else:
+                STATE["progress"][key] = {"pos": int(body["pos"]), "dur": int(body["dur"]), "done": body["pos"] >= body["dur"] * 0.92, "t": time.time()}
+            return self._send(200, {"ok": True})
         if r == "stop":
             return self._send(200, {"ok": True})
         return self._send(404, {})
@@ -125,7 +152,7 @@ def browser_page(p, width=900):
 def open_card(pg, **cfg):
     pg.goto(f"http://127.0.0.1:{PORT}/")
     pg.evaluate("""(cfg) => { const c = document.createElement('stalker-card'); c.setConfig(cfg); document.body.appendChild(c); c.hass = window.hassStub; window.card = c; }""", cfg)
-    pg.wait_for_selector("stalker-card >> .tab")
+    pg.wait_for_selector("stalker-card >> .sc-tab")
     return pg
 
 
