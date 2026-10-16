@@ -768,7 +768,7 @@ class StalkerCard extends HTMLElement {
     this._renderPlayer();
     if (!this._playerDialog.open) this._playerDialog.showModal();
     try {
-      const r = await this._api("POST", "play", { kind, id, start: start || 0 });
+      const r = await this._api("POST", "play", { kind, id, start: start || 0, ...(this._canHevc() ? { hevc: true } : {}) });
       if (!this._player || this._player.id !== id) return;
       this._player = { ...this._player, session: r.session, url: r.url, live: r.live, duration: r.duration, start: r.start || 0, transcoding: r.transcoding, loading: false };
       this._renderPlayer();
@@ -779,6 +779,12 @@ class StalkerCard extends HTMLElement {
       this._player = { ...this._player, loading: false, error: errMessage(e) };
       this._renderPlayer();
     }
+  }
+
+  // Can this player decode HEVC itself (Safari/iOS, Chrome with hardware decoding)? Then the server copies it.
+  _canHevc() {
+    const t = 'video/mp4; codecs="hvc1.2.4.L150.B0"';
+    try { return !!(window.MediaSource?.isTypeSupported?.(t) || document.createElement("video").canPlayType(t)); } catch (_) { return false; }
   }
 
   async _attach(url) {

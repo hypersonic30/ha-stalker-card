@@ -140,6 +140,19 @@ with sync_playwright() as p:
     pg.locator(O + ".sc-spin [data-action=close_player]").click()
     pg.wait_for_timeout(300)
 
+    # HEVC capability is reported to the server (a player that can decode it gets the stream copied)
+    check("no hevc flag when the browser cannot decode HEVC", "hevc" not in [c for c in calls() if c[1] == "play"][-1][2])
+    pg.evaluate("() => { MediaSource.isTypeSupported = () => true; }")
+    close_sheet(pg)
+    pg.locator(C + ".sc-grid .sc-tile").click()
+    pg.wait_for_selector(O + ".sc-sheet")
+    pg.locator(O + "[data-action=play_vod]").first.click()
+    pg.wait_for_timeout(600)
+    check("hevc flag is sent when the browser can decode HEVC", [c for c in calls() if c[1] == "play"][-1][2].get("hevc") is True)
+    pg.evaluate("() => { MediaSource.isTypeSupported = () => false; }")
+    pg.locator(O + "[data-action=close_player]").click()
+    pg.wait_for_timeout(300)
+
     # errors are shown inside the player, in German
     close_sheet(pg)
     pg.locator(C + ".sc-grid .sc-tile").click()
