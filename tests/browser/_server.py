@@ -23,7 +23,7 @@ def reset():
     STATE.update(calls=[], info={"vod": True, "series": True, "max_streams": 1}, play_error=None, session=0,
                  transcoding=False, progress={}, resume=[], long_season=False,
                  portals=[{"id": "p1", "title": "Zuhause", "source": "stalker"}], channels_by={}, info_by={}, favs={},
-                 seen=[], delay={}, fav_error=None, progress_by={})
+                 seen=[], delay={}, fav_error=None, progress_by={}, tracks=None)
 
 
 def calls():
@@ -136,7 +136,9 @@ class H(http.server.BaseHTTPRequestHandler):
             STATE["session"] += 1
             live = body["kind"] == "live"
             return self._send(200, {"session": f"sess{STATE['session']}", "live": live, "duration": None if live else 300.0,
-                                    "start": body.get("start", 0), "transcoding": STATE["transcoding"], "url": "/api/stalker/hls/index.m3u8"})
+                                    "start": body.get("start", 0), "transcoding": STATE["transcoding"], "url": "/api/stalker/hls/index.m3u8",
+                                    **({"audio": STATE["tracks"]["audio"], "subs": STATE["tracks"]["subs"],
+                                        "audio_index": body.get("audio", STATE["tracks"]["audio"][0]["index"])} if STATE["tracks"] else {})})
         if r == "progress":
             key = f"{body['kind']}:{body['id']}"
             if "done" in body:

@@ -1,5 +1,5 @@
 /* Stalker Card – Live-TV, Programm, Filme und Serien aus einem oder mehreren Portalen (Integration "stalker"). */
-const CARD_VERSION = "0.4.1";
+const CARD_VERSION = "0.5.0";
 const CARD_TAG = "stalker-card";
 const HLS_URL = "https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.17/hls.min.js";
 const PAGE = 60; // Filme je Seite (Server)
@@ -12,6 +12,10 @@ const EPG_REFRESH_MS = 60000;
 const REPORT_EVERY_MS = 15000;
 const RESUME_MIN_S = 30; // darunter: nur kurz angetippt
 const RESUME_BACK_S = 5;
+const LS_SUB = "sc-sub"; // last subtitle language ("" = off)
+const LANGS = { ger: "Deutsch", deu: "Deutsch", de: "Deutsch", eng: "Englisch", en: "Englisch", fra: "Französisch", fre: "Französisch",
+  spa: "Spanisch", ita: "Italienisch", jpn: "Japanisch", tur: "Türkisch", rus: "Russisch", por: "Portugiesisch", pol: "Polnisch", nld: "Niederländisch", dut: "Niederländisch" };
+const langName = (l, i) => LANGS[l] || (l && l !== "und" ? l.toUpperCase() : `Spur ${i + 1}`);
 const FAV = "__fav__"; // Pseudo-Genre "Favoriten"
 const LS_PORTAL = "sc-portal"; // zuletzt gewähltes Portal
 
@@ -227,9 +231,29 @@ const STYLE = `
   .sc-pbar { display: flex; align-items: center; gap: 10px; padding: 10px 12px calc(12px + env(safe-area-inset-bottom)); background: rgba(0,0,0,0.85); }
   .sc-pbar input[type=range] { flex: 1; accent-color: var(--sc-accent); height: 26px; }
   .sc-pbar span { font-size: 0.8em; opacity: 0.85; min-width: 48px; text-align: center; }
+  .sc-pmenus { position: relative; }
+  .sc-pmenu { position: absolute; right: 12px; bottom: 6px; z-index: 5; display: flex; flex-direction: column; min-width: 170px; max-height: 50dvh; overflow-y: auto;
+    border-radius: var(--sc-radius-md); background: rgba(30,30,32,0.96); box-shadow: 0 10px 30px rgba(0,0,0,0.5); padding: 6px; }
+  .sc-pmenu button { text-align: left; border: 0; background: none; color: white; font: inherit; padding: 10px 12px; border-radius: 10px; cursor: pointer; }
+  .sc-pmenu button.on { background: color-mix(in srgb, var(--sc-accent) 80%, transparent); }
+  .sc-pmenu small { opacity: 0.7; margin-left: 6px; }
   .sc-spin { position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column; gap: 8px; align-items: center; justify-content: center; text-align: center; padding: 24px; background: rgba(0,0,0,0.6); }
   .sc-spin small { opacity: 0.8; }
 </style>`;
+
+function parseVtt(text) {
+  const toS = (s) => { const q = s.replace(",", ".").split(":").map(Number); return q.reduce((a, n) => a * 60 + n, 0); };
+  const out = [];
+  for (const block of text.replace(/\r/g, "").split(/\n\n+/)) {
+    const lines = block.split("\n");
+    const i = lines.findIndex((l) => l.includes("-->"));
+    if (i < 0) continue;
+    const m = lines[i].match(/([\d:.,]+)\s*-->\s*([\d:.,]+)/);
+    const body = lines.slice(i + 1).join("\n").replace(/\{\\[^}]*\}/g, "").trim();
+    if (m && body) out.push({ start: toS(m[1]), end: toS(m[2]), text: body });
+  }
+  return out;
+}
 
 class StalkerCard extends HTMLElement {
   constructor() {
@@ -868,15 +892,18 @@ class StalkerCard extends HTMLElement {
     this._teardownVideo();
     const keep = extra.list ? extra : { list: this._player?.list, logo: this._player?.logo };
     const sid = extra.sid ?? (this._player?.id === id ? this._player.sid : undefined);
+    const audio = extra.audio ?? (this._player?.id === id ? this._player.audio_index : undefined); // kept over seeks and restarts
     this._player = { kind, id, title, sub, sid, loading: true, start: start || 0, list: keep.list, logo: keep.logo };
     this._renderPlayer();
     if (!this._playerDialog.open) this._playerDialog.showModal();
     try {
-      const r = await this._api("POST", "play", { kind, id, start: start || 0, ...(sid ? { sid } : {}), ...(this._canHevc() ? { hevc: true } : {}) });
+      const r = await this._api("POST", "play", { kind, id, start: start || 0, ...(sid ? { sid } : {}), ...(audio != null ? { audio } : {}), ...(this._canHevc() ? { hevc: true } : {}) });
       if (!this._player || this._player.id !== id) return;
-      this._player = { ...this._player, session: r.session, url: r.url, live: r.live, duration: r.duration, start: r.start || 0, transcoding: r.transcoding, loading: false };
+      this._player = { ...this._player, session: r.session, url: r.url, live: r.live, duration: r.duration, start: r.start || 0, transcoding: r.transcoding, loading: false,
+        audios: r.audio || [], audio_index: r.audio_index, subs: r.subs || [] };
       this._renderPlayer();
       await this._attach(r.url);
+      this._initSubs();
       if (kind === "live") this._pollEpg(id);
     } catch (e) {
       if (!this._player || this._player.id !== id) return;
@@ -949,10 +976,12 @@ class StalkerCard extends HTMLElement {
       <video playsinline x-webkit-airplay="allow" ${live ? "controls" : ""} autoplay></video>
       ${p.loading ? `<div class="sc-spin">Stream startet …${p.kind !== "live" ? `<small>Der erste Start kann bis zu einer halben Minute dauern.</small>` : ""}</div>` : ""}
       ${p.error ? `<div class="sc-spin">${esc(p.error)}<button class="sc-btn" data-action="close_player">Schließen</button></div>` : ""}
-      ${vod && p.duration ? `<div class="sc-pbar"><button class="sc-pbtn" data-action="toggle" aria-label="Pause/Weiter"><ha-icon icon="mdi:play-pause"></ha-icon></button>
+      ${vod && p.duration ? `<div class="sc-pmenus">${this._menuHtml(p)}</div><div class="sc-pbar"><button class="sc-pbtn" data-action="toggle" aria-label="Pause/Weiter"><ha-icon icon="mdi:play-pause"></ha-icon></button>
         <span id="sc-cur">${fmtTime(p.start)}</span>
         <input data-seek type="range" min="0" max="${Math.floor(p.duration)}" step="5" value="${Math.floor(p.start)}" aria-label="Position">
         <span>${fmtTime(p.duration)}</span>
+        ${(p.audios || []).length > 1 ? `<button class="sc-pbtn" data-action="menu" data-menu="audio" aria-label="Tonspur"><ha-icon icon="mdi:account-voice"></ha-icon></button>` : ""}
+        ${(p.subs || []).length ? `<button class="sc-pbtn" data-action="menu" data-menu="sub" aria-label="Untertitel"><ha-icon icon="mdi:subtitles-outline"></ha-icon></button>` : ""}
         <button class="sc-pbtn" id="sc-pcast" data-action="cast" aria-label="AirPlay / Streamen" hidden><ha-icon icon="mdi:cast"></ha-icon></button>
         <button class="sc-pbtn" data-action="fullscreen" aria-label="Vollbild"><ha-icon icon="mdi:fullscreen"></ha-icon></button></div>` : ""}</div>`;
     const video = dlg.querySelector("video");
@@ -982,6 +1011,76 @@ class StalkerCard extends HTMLElement {
     const next = p.list[(i + Number(el.dataset.dir) + p.list.length) % p.list.length];
     const c = this._live?.channels.find((x) => x.id === next);
     if (c) this._play("live", c.id, c.name, "", 0, { list: p.list, logo: c.logo });
+  }
+
+  _menuHtml(p) {
+    const aud = (p.audios || []).length > 1 ? `<div class="sc-pmenu" data-menu="audio" hidden>${p.audios.map((a, i) =>
+      `<button data-action="pick_audio" data-idx="${a.index}" class="${a.index === p.audio_index ? "on" : ""}">${esc(langName(a.lang, i))} <small>${esc(a.codec)}</small></button>`).join("")}</div>` : "";
+    const sub = (p.subs || []).length ? `<div class="sc-pmenu" data-menu="sub" hidden><button data-action="pick_sub" data-idx="" class="${this._subSel == null ? "on" : ""}">Aus</button>${p.subs.map((s, i) =>
+      `<button data-action="pick_sub" data-idx="${s.index}" class="${s.index === this._subSel ? "on" : ""}">${esc(langName(s.lang, i))}</button>`).join("")}</div>` : "";
+    return aud + sub;
+  }
+
+  _a_menu(el) {
+    const open = el.dataset.menu;
+    this._playerDialog.querySelectorAll(".sc-pmenu").forEach((m) => { m.hidden = m.dataset.menu !== open || !m.hidden; });
+  }
+
+  _a_pick_audio(el) {
+    const p = this._player;
+    const idx = Number(el.dataset.idx);
+    if (!p || idx === p.audio_index) { this._a_menu({ dataset: { menu: "" } }); return; }
+    const video = this._overlayRoot.querySelector("video");
+    const pos = Math.floor(p.start + (video?.currentTime || 0));
+    this._play(p.kind, p.id, p.title, p.sub, pos, { sid: p.sid, audio: idx }); // a new stream: the portal needs a few seconds
+  }
+
+  _a_pick_sub(el) {
+    this._selectSub(el.dataset.idx === "" ? null : Number(el.dataset.idx), true);
+    this._a_menu({ dataset: { menu: "" } });
+  }
+
+  // Text subtitles come as growing WebVTT files next to the playlist; cues are added to a TextTrack as they appear.
+  _initSubs() {
+    const p = this._player;
+    if (!p?.subs?.length) { this._subSel = null; return; }
+    let want = null;
+    try { want = localStorage.getItem(LS_SUB) || ""; } catch (_) { /* optional */ }
+    const hit = want ? p.subs.find((s) => s.lang === want) : null;
+    this._selectSub(hit ? hit.index : null, false);
+  }
+
+  _selectSub(index, remember) {
+    const p = this._player;
+    const video = this._overlayRoot.querySelector("video");
+    clearInterval(this._subTimer);
+    this._subSel = index;
+    if (remember) {
+      try { localStorage.setItem(LS_SUB, index == null ? "" : (p.subs.find((s) => s.index === index)?.lang || "")); } catch (_) { /* optional */ }
+    }
+    this._playerDialog.querySelectorAll("[data-action=pick_sub]").forEach((b) => b.classList.toggle("on", b.dataset.idx === (index == null ? "" : String(index))));
+    if (!video) return;
+    for (const tr of [...video.textTracks]) if (tr.label === "sc") { tr.mode = "hidden"; for (const c of [...(tr.cues || [])]) tr.removeCue(c); tr.mode = "disabled"; } // cues are only listed on a non-disabled track
+    this._subCues = new Set();
+    if (index == null || !p?.url) return;
+    let track = [...video.textTracks].find((tr) => tr.label === "sc");
+    if (!track) track = video.addTextTrack("subtitles", "sc", "de");
+    track.mode = "showing";
+    const url = p.url.replace(/index\.m3u8.*$/, `sub${index}.vtt`);
+    const poll = async () => {
+      try {
+        const r = await fetch(url, { cache: "no-store" });
+        if (!r.ok) return;
+        for (const c of parseVtt(await r.text())) {
+          const key = `${c.start}|${c.text}`;
+          if (this._subCues?.has(key)) continue;
+          this._subCues?.add(key);
+          try { track.addCue(new VTTCue(c.start, c.end, c.text)); } catch (_) { /* odd cue */ }
+        }
+      } catch (_) { /* next poll */ }
+    };
+    poll();
+    this._subTimer = setInterval(poll, 8000);
   }
 
   _a_cast() {
@@ -1064,6 +1163,8 @@ class StalkerCard extends HTMLElement {
 
   _teardownVideo() {
     clearTimeout(this._epgTimer);
+    clearInterval(this._subTimer);
+    this._subCues = null;
     if (this._hls) { this._hls.destroy(); this._hls = null; }
     const v = this._overlayRoot?.querySelector("video");
     if (v) { v.pause(); v.removeAttribute("src"); v.load?.(); }
