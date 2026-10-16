@@ -15,6 +15,7 @@ const RESUME_BACK_S = 5;
 
 const ERRORS = {
   video_codec_unsupported: "Dieses Video enthält keinen abspielbaren Videostream.",
+  transcode_disabled: "Dieses Video braucht Umkodierung, die in den Einstellungen der Integration ausgeschaltet ist.",
   stream_timeout: "Der Stream hat nicht rechtzeitig gestartet. Das Portal erlaubt evtl. nur einen Stream gleichzeitig.",
   stream_failed: "Der Stream konnte nicht geöffnet werden.",
   probe_timeout: "Das Portal antwortet zu langsam.",
