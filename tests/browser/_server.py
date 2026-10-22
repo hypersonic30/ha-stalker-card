@@ -138,7 +138,9 @@ class H(http.server.BaseHTTPRequestHandler):
             if STATE["fav_error"]:
                 return self._send(409, {"code": STATE["fav_error"]})
             ids = STATE["favs"].setdefault(portal or STATE["portals"][0]["id"], [])
-            if body["fav"] and body["id"] not in ids:
+            if "order" in body:
+                ids[:] = body["order"]
+            elif body["fav"] and body["id"] not in ids:
                 ids.append(body["id"])
             elif not body["fav"] and body["id"] in ids:
                 ids.remove(body["id"])

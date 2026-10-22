@@ -1,5 +1,5 @@
 /* Stalker Card – Live-TV, Programm, Filme und Serien aus einem oder mehreren Portalen (Integration "stalker"). */
-const CARD_VERSION = "0.6.0";
+const CARD_VERSION = "0.6.1";
 const CARD_TAG = "stalker-card";
 const HLS_URL = "https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.17/hls.min.js";
 const PAGE = 60; // Filme je Seite (Server)
@@ -16,6 +16,7 @@ const LS_SUB = "sc-sub"; // last subtitle language ("" = off)
 const LANGS = { ger: "Deutsch", deu: "Deutsch", de: "Deutsch", eng: "Englisch", en: "Englisch", fra: "Französisch", fre: "Französisch",
   spa: "Spanisch", ita: "Italienisch", jpn: "Japanisch", tur: "Türkisch", rus: "Russisch", por: "Portugiesisch", pol: "Polnisch", nld: "Niederländisch", dut: "Niederländisch" };
 const langName = (l, i) => LANGS[l] || (l && l !== "und" ? l.toUpperCase() : `Spur ${i + 1}`);
+const LONG_PRESS_MS = 550;
 const FAV = "__fav__"; // Pseudo-Genre "Favoriten"
 const LS_PORTAL = "sc-portal"; // zuletzt gewähltes Portal
 
@@ -141,6 +142,12 @@ const STYLE = `
   .sc-fav { flex: none; width: 46px; border-radius: var(--sc-radius-md); cursor: pointer; color: var(--secondary-text-color);
     background: var(--sc-soft); border: 1px solid var(--sc-line); display: inline-flex; align-items: center; justify-content: center; }
   .sc-fav.on { color: #ffcc00; }
+  .sc-chrow .sc-ch { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+  .sc-sortbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 8px; font-size: 0.85em; color: var(--secondary-text-color); }
+  .sc-sortrow .sc-ch { cursor: default; }
+  .sc-grip { flex: none; width: 40px; border-radius: var(--sc-radius-md); display: inline-flex; align-items: center; justify-content: center; cursor: grab;
+    touch-action: none; background: var(--sc-soft); border: 1px solid var(--sc-line); color: var(--secondary-text-color); }
+  .sc-sortrow.drag { position: relative; z-index: 5; opacity: 0.92; box-shadow: 0 6px 18px rgba(0,0,0,0.35); }
   .sc-chip ha-icon { --mdc-icon-size: 16px; display: inline-flex; margin-right: 4px; }
   .sc-ch.on { background: color-mix(in srgb, var(--sc-accent) 14%, var(--sc-soft)); }
   .sc-logo { width: 46px; height: 46px; flex: none; border-radius: 10px; background: color-mix(in srgb, var(--primary-text-color) 8%, transparent);
@@ -362,7 +369,7 @@ class StalkerCard extends HTMLElement {
     this._portal = id;
     try { localStorage.setItem(LS_PORTAL, id); } catch (_) { /* optional */ }
     Object.assign(this, {
-      _info: null, _live: null, _now: {}, _favs: [], _series: null, _prog: { items: {}, resume: [] }, _genre: "", _error: "",
+      _info: null, _live: null, _now: {}, _favs: [], _sort: false, _series: null, _prog: { items: {}, resume: [] }, _genre: "", _error: "",
       _vod: { items: [], total: 0, page: 0, groups: [], group: "" }, _guide: { t0: 0, progs: {}, loading: false },
       _q: { live: "", guide: "", vod: "", series: "" }, _show: SHOW_STEP, _gshow: GUIDE_ROWS,
     });
@@ -390,6 +397,90 @@ class StalkerCard extends HTMLElement {
     }
     if (this._player?.id === id) this._renderPlayerFav();
     this._render();
+  }
+
+  // ── Favourite order: long press (or the Sortieren button) → move with the arrows ──
+  _sorting() { return !!this._sort && this._tab === "live" && this._genre === FAV && !this._q.live; }
+  _a_sort_start() { this._sort = true; this._render(); }
+  _a_sort_done() { this._sort = false; this._render(); }
+
+  _dragStart(e, grip) {
+    const row = grip.closest(".sc-sortrow");
+    const list = row.parentElement;
+    let y0 = e.clientY;
+    row.classList.add("drag");
+    try { grip.setPointerCapture(e.pointerId); } catch (_) { /* optional */ }
+    const move = (ev) => {
+      if (ev.clientY < 90) window.scrollBy(0, -14); else if (ev.clientY > window.innerHeight - 90) window.scrollBy(0, 14);
+      row.style.transform = `translateY(${ev.clientY - y0}px)`;
+      for (;;) {
+        const r = row.getBoundingClientRect(), mid = r.top + r.height / 2;
+        const prev = row.previousElementSibling, next = row.nextElementSibling;
+        const pr = prev?.getBoundingClientRect(), nr = next?.getBoundingClientRect();
+        if (prev && mid < pr.top + pr.height / 2) { const h = prev.offsetHeight + 8; list.insertBefore(row, prev); y0 -= h; }
+        else if (next && mid > nr.top + nr.height / 2) { const h = next.offsetHeight + 8; list.insertBefore(next, row); y0 += h; }
+        else break;
+        row.style.transform = `translateY(${ev.clientY - y0}px)`;
+      }
+    };
+    const end = () => {
+      grip.removeEventListener("pointermove", move);
+      grip.removeEventListener("pointerup", end);
+      grip.removeEventListener("pointercancel", end);
+      const order = [...list.children].map((r) => r.dataset.id);
+      this._applyOrder(order);
+    };
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", end);
+    grip.addEventListener("pointercancel", end);
+  }
+
+  _applyOrder(shownOrder) {
+    const rest = this._favs.filter((id) => !shownOrder.includes(id));
+    const next = [...shownOrder, ...rest];
+    if (next.join() !== this._favs.join()) {
+      if (this._favsBefore === undefined) this._favsBefore = this._favs;
+      this._favs = next;
+      this._saveOrder();
+    }
+    this._render();
+  }
+
+  _saveOrder = debounce(async () => {
+    const order = this._favs;
+    const before = this._favsBefore;
+    this._favsBefore = undefined;
+    try {
+      await this._api("POST", "favorites", { order });
+    } catch (e) {
+      if (e?.stale) return;
+      if (before) this._favs = before;
+      this._error = errMessage(e);
+      this._render();
+    }
+  }, 500);
+
+  _bindLongPress(root) {
+    let timer = null, x0 = 0, y0 = 0;
+    const clear = () => { clearTimeout(timer); timer = null; };
+    root.addEventListener("pointerdown", (e) => {
+      const grip = e.target.closest?.("[data-grip]");
+      if (grip && this._sorting()) { e.preventDefault(); this._dragStart(e, grip); return; }
+      this._lpFired = false;
+      const row = e.target.closest?.(".sc-chrow .sc-ch");
+      if (!row || this._sorting() || this._tab !== "live" || this._genre !== FAV || this._q.live) return;
+      x0 = e.clientX; y0 = e.clientY;
+      timer = setTimeout(() => {
+        timer = null;
+        this._lpFired = true;
+        this._sort = true;
+        try { navigator.vibrate?.(30); } catch (_) { /* optional */ }
+        this._render();
+      }, LONG_PRESS_MS);
+    });
+    root.addEventListener("pointermove", (e) => { if (timer && Math.hypot(e.clientX - x0, e.clientY - y0) > 10) clear(); });
+    for (const t of ["pointerup", "pointercancel", "pointerleave"]) root.addEventListener(t, clear);
+    root.addEventListener("contextmenu", (e) => { if (e.target.closest?.(".sc-chrow .sc-ch")) e.preventDefault(); });
   }
 
   async _loadProgress() {
@@ -479,6 +570,7 @@ class StalkerCard extends HTMLElement {
 
     for (const root of this._rootBound ? [this._overlayRoot] : [this.shadowRoot, this._overlayRoot]) {
       root.addEventListener("click", (e) => this._onClick(e));
+      this._bindLongPress(root);
       root.addEventListener("input", (e) => this._onInput(e));
       root.addEventListener("change", (e) => this._onChange(e));
       root.addEventListener("submit", (e) => e.preventDefault());
@@ -563,14 +655,24 @@ class StalkerCard extends HTMLElement {
     const list = (this._live?.channels || []).filter((c) =>
       (!this._genre || (this._genre === FAV ? favs.has(c.id) : c.genre_id === this._genre))
       && (!q || c.name.toLowerCase().includes(q)) && (!onlyGuide || this._now[c.id]));
+    // Favourites keep the order the user gave them (sorted via long press).
+    const rank = (c) => this._favs.indexOf(c.id);
+    const byRank = (a, b) => rank(a) - rank(b);
+    if (this._genre === FAV) return list.sort(byRank);
     // In the guide the favourites come first (like a favourites group in a TV app).
-    return onlyGuide && !this._genre && favs.size ? [...list.filter((c) => favs.has(c.id)), ...list.filter((c) => !favs.has(c.id))] : list;
+    return onlyGuide && !this._genre && favs.size ? [...list.filter((c) => favs.has(c.id)).sort(byRank), ...list.filter((c) => !favs.has(c.id))] : list;
   }
 
   _liveHtml() {
     if (!this._live) return `<div class="sc-loading">Lade Kanäle …</div>`;
     const all = this._filteredChannels();
     const now = Date.now() / 1000;
+    const sorting = this._sorting();
+    if (sorting) {
+      const rows = all.map((c) => `<div class="sc-chrow sc-sortrow" data-id="${esc(c.id)}"><div class="sc-grip" data-grip aria-label="Zum Verschieben ziehen"><ha-icon icon="mdi:drag-horizontal-variant"></ha-icon></div>
+        <div class="sc-ch">${this._logo(c)}<div class="sc-ch-main"><div class="sc-ch-name">${esc(c.name)}</div></div></div></div>`).join("");
+      return `${this._genreChips()}<div class="sc-sortbar"><span>Am Griff links ziehen</span><button class="sc-btn" data-action="sort_done">Fertig</button></div><div class="sc-channels">${rows}</div>`;
+    }
     const rows = all.slice(0, this._show).map((c) => {
       const n = this._now[c.id];
       const cur = n && n.s <= now && now < n.e ? n : null;
@@ -580,7 +682,8 @@ class StalkerCard extends HTMLElement {
         ${cur ? `<div class="sc-ch-now">${hhmm(cur.s)} ${esc(cur.t)}</div><div class="sc-meter"><div style="width:${Math.min(100, Math.max(0, ((now - cur.s) / (cur.e - cur.s)) * 100)).toFixed(0)}%"></div></div>` : ""}</div></button>
         <button class="sc-fav ${fav ? "on" : ""}" data-action="fav" data-id="${esc(c.id)}" aria-pressed="${fav}" aria-label="${fav ? "Aus Favoriten entfernen" : "Zu Favoriten"}"><ha-icon icon="${fav ? "mdi:star" : "mdi:star-outline"}"></ha-icon></button></div>`;
     }).join("");
-    return `${this._genreChips()}<div class="sc-channels">${rows || `<div class="sc-empty">${this._genre === FAV ? "Noch keine Favoriten – tippe den Stern bei einem Sender." : "Keine Kanäle gefunden."}</div>`}</div>
+    const canSort = this._genre === FAV && all.length > 1 && !this._q.live;
+    return `${this._genreChips()}${canSort ? `<div class="sc-sortbar"><span>Lange drücken zum Sortieren</span><button class="sc-btn secondary" data-action="sort_start"><ha-icon icon="mdi:sort"></ha-icon>Sortieren</button></div>` : ""}<div class="sc-channels">${rows || `<div class="sc-empty">${this._genre === FAV ? "Noch keine Favoriten – tippe den Stern bei einem Sender." : "Keine Kanäle gefunden."}</div>`}</div>
       ${all.length > this._show ? `<button class="sc-btn secondary sc-more" data-action="more">Mehr (${all.length - this._show})</button>` : ""}`;
   }
 
@@ -749,6 +852,7 @@ class StalkerCard extends HTMLElement {
 
   // ── Events (data-action="x" → _a_x) ──────────────────────────────────
   _onClick(e) {
+    if (this._lpFired) { this._lpFired = false; e.preventDefault(); return; } // the release after a long press
     const el = e.target.closest("[data-action]");
     if (!el) return;
     // a button inside an actionable row wins (e.g. the watched toggle inside an episode)
@@ -760,6 +864,7 @@ class StalkerCard extends HTMLElement {
     const t = e.target;
     if (t.dataset?.q !== undefined) {
       this._q[this._tab] = t.value;
+      this._sort = false;
       this._show = SHOW_STEP;
       this._gshow = GUIDE_ROWS;
       if (this._tab === "vod") this._searchVod();
@@ -787,6 +892,7 @@ class StalkerCard extends HTMLElement {
   }, 200);
 
   async _a_tab(el) {
+    this._sort = false;
     this._tab = el.dataset.tab;
     this._show = SHOW_STEP;
     this._gshow = GUIDE_ROWS;
@@ -796,6 +902,7 @@ class StalkerCard extends HTMLElement {
     if (this._tab === "vod" || this._tab === "series") this._loadProgress();
   }
   async _a_genre(el) {
+    this._sort = false;
     this._genre = el.dataset.id;
     this._show = SHOW_STEP;
     this._gshow = GUIDE_ROWS;
